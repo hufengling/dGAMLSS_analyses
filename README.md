@@ -1,0 +1,1 @@
+This repository contains files and RMarkdowns used during development of the dGAMLSS method. This includes development code, analyses, and manuscript preparation files. For the final method, please see: https://github.com/hufengling/dgamlss
