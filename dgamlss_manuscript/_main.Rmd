@@ -1,0 +1,183 @@
+---
+title: "dGAMLSS: An exact, distributed algorithm to fit Generalized Additive Models for Location, Scale, and Shape for privacy-preserving biomedical inference"
+author:
+  - Fengling Hu:
+      email: fengling.hu@pennmedicine.upenn.edu; 423 Guardian Dr, Philadelphia, PA 19104
+      institute: pennsive
+      correspondence: true
+  - name: Jiayi Tong
+    institute: penncil
+  - name: Yong Chen
+    institute: penncil
+  - name: Russell T. Shinohara
+    institute: [pennsive, cbica]
+    
+institute:
+  - pennsive: Penn Statistics in Imaging and Visualization Endeavor (PennSIVE), Department of Biostatistics, Epidemiology, and Informatics, Perelman School of Medicine, University of Pennsylvania
+  - penncil: Penn Computing, Inference, and Learning Lab (PennCIL), Department of Biostatistics, Epidemiology, and Informatics, Perelman School of Medicine, University of Pennsylvania
+  - cbica: Center for Biomedical Image Computing and Analytics (CBICA), Perelman School of Medicine, University of Pennsylvania
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+site: bookdown::bookdown_site
+output:
+  bookdown::word_document2:
+    fig_caption: yes
+    number_sections: yes
+    global_numbering: yes
+    md_extensions: +footnotes
+    reference_docx: word_style_reference.docx
+    extra_dependencies: ["algorithm2e", "algorithmic"]
+    pandoc_args:
+      - '--lua-filter=scholarly-metadata.lua'
+      - '--lua-filter=author-info-blocks.lua'
+    toc: no
+  bookdown::pdf_document2:
+    fig_caption: yes
+    number_sections: yes
+    global_numbering: yes
+    toc: no
+bibliography: references.bib
+fontsize: 12pt
+link-citations: yes
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/biometrics.csl
+---
+
+# CRediT author statement {-}
+
+**Fengling Hu:** Conceptualization, Methodology, Software, Validation, Formal Analysis, Investigation, Data Curation, Writing -- Original Draft, Writing -- Review & Editing, Visualization. 
+**Jiayi Tong:** Methodology, Validation, Resources, Investigation, Writing -- Review & Editing.
+**Yong Chen:** Methodology, Validation, Resources, Investigation, Writing -- Review & Editing, Supervision.
+**Russell T. Shinohara:** Conceptualization, Methodology, Validation, Resources, Investigation, Writing -- Review & Editing, Supervision, Project administration, Funding acquisition.
+
+# Disclosures and Conflicts of Interest {-}
+TODO
+
+# Funding {-}
+TODO
+
+```{r include = FALSE}
+knitr::opts_chunk$set(fig.width=5, fig.height=3.5, echo = FALSE, warning = FALSE, message = FALSE) 
+```
+\newpage
+
+<!--chapter:end:index.Rmd-->
+
+# Hello bookdown 
+
+All chapters start with a first-level heading followed by your chapter title, like the line above. There should be only one first-level heading (`#`) per .Rmd file.
+
+## A section
+
+All chapter sections start with a second-level (`##`) or higher heading followed by your section title, like the sections above and below here. You can have as many as you want within a chapter.
+
+### An unnumbered section {-}
+
+Chapters and sections are numbered by default. To un-number a heading, add a `{.unnumbered}` or the shorter `{-}` at the end of the heading, like in this section.
+
+<!--chapter:end:01-intro.Rmd-->
+
+# Methods
+
+We develop a distributed GAMLSS algorithm (dGAMLSS) based on the Rigby and Stasinopoulos (RS) algorithm for GAMLSS fitting [@rigbySemiparametricAdditiveModel1996; @rigbyGeneralizedAdditiveModels2005]. Ultimately, the dGAMLSS algorithm provides distributed machinery for exact fitting of GAMLSS for distributions with up to four parameters across multiple sites without sharing any patient-level data. For each parameter, dGAMLSS can fit fixed effect covariates as well as up to one smooth term defined as either a fixed effect B-spline or a penalized B-spline with known penalty weight [@eilersFlexibleSmoothingBsplines1996]. Additionally, dGAMLSS enables distributed inference using observed Hessian matrices from each site. Finally, dGAMLSS provides model-based centiles, allowing for normative outcome modeling.
+
+## Distributed RS algorithm
+
+The gold-standard, pooled RS algorithm is provided in Appendix B of @rigbyGeneralizedAdditiveModels2005. Briefly, the RS algorithm consists of two cycles which result in maximization of the pooled likelihood with respect to the fixed effect and smoothing coefficients. The outer cycle iterates across the GAMLSS distribution-specific parameters in order from $\mu$ to $\tau$. Meanwhile, the inner cycle performs Newton-Raphson updates on the outer-cycle parameter-wise coefficients while keeping coefficients for all other parameters constant. Each inner cycle is completed when the parameter-wise coefficients converge. The outer cycle is completed when all parameter-wise coefficients converge.
+
+Notably, the pooled RS algorithm describes an additional backfitting cycle within the inner cycle. This backfitting lets GAMLSS fit multiple smooth terms for each parameter, similarly to a generalized additive model (GAM) [TODO]. We forego discussion of the RS backfitting algorithm here -- in the distributed setting, backfitting tends to require a prohibitive number of additional communication rounds within each inner cycle. Instead, we provide a distributed RS approach for fitting up to one smooth term per parameter, using either a fixed effect spline design matrix or a penalized spline with a fixed penalty.
+
+We provide some notation:
+
+\begin{table}[!h]
+\centering
+\caption{My LyX table}
+\begin{tabular}{ccccccc}
+\hline 
+Car & mpg & cyl & disp & hp & drat & wt\tabularnewline
+\hline 
+Mazda RX4 & 21.00 & 6.00 & 160.00 & 110.00 & 3.90 & 2.62\tabularnewline
+Mazda RX4 Wag & 21.00 & 6.00 & 160.00 & 110.00 & 3.90 & 2.88\tabularnewline
+Datsun 710 & 22.80 & 4.00 & 108.00 & 93.00 & 3.85 & 2.32\tabularnewline
+Hornet 4 Drive & 21.40 & 6.00 & 258.00 & 110.00 & 3.08 & 3.21\tabularnewline
+Hornet Sportabout & 18.70 & 8.00 & 306.00 & 175.00 & 3.15 & 3.44\tabularnewline
+\hline 
+\end{tabular}
+\label{lyxtab2}
+\end{table}
+
+$m$ Total number of sites.
+$i$ Index of sites, $1, \ldots, m$.
+
+$n$ Total number of subjects across all sites.
+$n_i$ Number of subjects in site $i$.
+$j$ Index of subjects within a specific site, $1, \ldots, n_i$.
+
+$p$ Total number of GAMLSS parameters depending on distribution, $p = 2, 3$, or $4$. $p = 4$ corresponds to distributions with $\mu$, $\sigma$, $\nu$, and $\tau$ parameters.
+$k$ GAMLSS parameter index, $1, \ldots, p$.
+$\beta_k$ Pooled fixed effect coefficients for parameter $k$.
+$\gamma_k$ (Optional) pooled smooth effect coefficients for parameter $k$.
+
+$\boldsymbol{\theta}_{ik}$ Fitted GAMLSS canonical parameter for site $i$ for parameter $k$. $\boldsymbol{\theta}_{i1}$, $\boldsymbol{\theta}_{i2}$, $\boldsymbol{\theta}_{i3}$, and $\boldsymbol{\theta}_{i4}$ correspond to $\mu_i$, $\sigma_i$, $\nu_i$, and $\tau_i$, respectively.
+$\boldsymbol{\eta}_{ik}$ GAMLSS linear predictor from site $i$ for parameter $k$, such that $g_k(\boldsymbol{\theta}_{ik}) = \boldsymbol{\eta}_{ik}$, where $g(\cdot)$ is the distribution-dependent canonical link function for the $k$th parameter.
+$\boldsymbol{u}_{ik}$ Vector of first derivatives of subject-wise log likelihoods with respect to $\boldsymbol{\eta}_{ik}$.
+$\boldsymbol{W}_{ik}$ Diagonal matrix of second derivatives of subject-wise log likelihoods with respect to $\boldsymbol{\eta}_{ik}$.
+$\boldsymbol{z}_{ik}$ Adjusted dependent variable from site $i$ for parameter $k$. $\boldsymbol{z}_{ik} = \boldsymbol{\eta}_{ik} + \boldsymbol{W}_{ik}^{-1}\boldsymbol{u}_{ik}$.
+
+$\boldsymbol{Y}_i$ Outcome vector from site $i$, dimension $n_i \times 1$.
+$\boldsymbol{X}_{ik}$ Fixed effects design matrix from site $i$ for parameter $k$, dimension $n_i \times \text{length}(\beta_k)$.
+$\boldsymbol{Z}_{ik}$ (Optional) smooth effect design matrix from site $i$ for parameter $k$, dimension $n_i \times \text{length}(\gamma_k)$.
+$\boldsymbol{M}_{i1}$ Update matrix from site $i$ for parameter $k$ with dimension $p \times p$
+$\boldsymbol{M}_{i2}$ Update matrix from site $i$ for parameter $k$ with dimension $p \times 1$
+
+$\boldsymbol{P}_{k}$ (Optional) Smoothing penalty matrix associated with 
+$\lambda_k$ Fixed smoothing penalty hyperparameter for parameter $k$. Higher $\lambda_k$ corresponds to more smoothing.
+
+Additionally, let $[\cdot \: \cdot]$ indicate row-wise concatenation of matrices.
+
+The abbreviated RS algorithm is as follows:
+
+\begin{algorithm}[H]
+  \SetKwInput{KwInit}{Initialize}
+  \KwData{(Client) $\boldsymbol{Y}_i, \boldsymbol{X}_i1, \ldots, \boldsymbol{X}_ip, \boldsymbol{Z}_{i1}, \ldots, \boldsymbol{Z}_ip$}
+  \KwData{(Global) If using penalized splines: $\boldsymbol{P}_{1}, \ldots, \boldsymbol{P}_{p}, \lambda_1, \ldots, \lambda_p$}
+  \KwResult{$\hat{\beta}_1, \ldots, \hat{\beta_p}, \hat{\gamma_1}, \ldots, \hat{\gamma_p}$. Corresponding test p-values and standard errors. Parametric centiles.}
+  \KwInit{Coefficients $\beta_1, \ldots, \beta_p, \gamma_1, \ldots, \gamma_p$}
+  \While{not all pooled coefficients have converged} {
+    \For{$k = 1, \ldots, p$} {
+        \While{$\beta_k$ and/or $\gamma_k$ have not converged} {
+            \If{only fixed effects} {
+                1. (Client $i$) Solve for $\boldsymbol{\eta}_{ik} = \boldsymbol{X}_{ik} \beta_k$. \\
+                2. (Client $i$) At $\boldsymbol{\eta}_{ik}$, evaluate $\boldsymbol{u}_{ik}$ and $\boldsymbol{W}_{ik}$. \\
+                3. (Client $i$) Evaluate $\boldsymbol{z}_{ik} = \boldsymbol{\eta}_{ik} + \boldsymbol{W}_{ik}^{-1} \boldsymbol{u}_{ik}$. \\
+                4. (Client $i$) Evaluate and send: $\boldsymbol{M}_{i1} = \boldsymbol{X}_{ik}^T \boldsymbol{W}_{ik} \boldsymbol{X}_{ik}$ and $\boldsymbol{M}_{i2} = \boldsymbol{X}_{ik}^T 
+ \boldsymbol{W}_{ik} \boldsymbol{z}_{ik}$. \\
+                5. (Central) Update $\beta_k = (\sum_{i = 1}^m\boldsymbol{M}_{i1})^{-1}(\sum_{i = 1}^m\boldsymbol{M}_{i2})$. \\ 
+            }
+            \If{fixed effects and fixed basis smooth} {
+                1. Re-define $\boldsymbol{X}_{ik} = [\boldsymbol{X}_{ik} \: \boldsymbol{Z}_{ik}]$ and $\beta_k = [\beta_k^T \: \gamma_k^T]^T$. \\
+                2. Fit using the "only fixed effects" algorithm. \\
+            }
+            \If{fixed effects and fixed penalty smooth} {
+                1. (Client $i$) Solve for $\boldsymbol{\eta}_{ik} = \boldsymbol{X}_{ik} \beta_k + \boldsymbol{Z}_{ik} \gamma_k$. \\
+                2. (Client $i$) At $\boldsymbol{\eta}_{ik}$, evaluate $\boldsymbol{u}_{ik}$ and $\boldsymbol{W}_{ik}$. \\
+                3. (Client $i$) Evaluate $\boldsymbol{z}_{ik} = \boldsymbol{\eta}_{ik} + \boldsymbol{W}_{ik}^{-1} \boldsymbol{u}_{ik}$. \\
+                4. (Client $i$) Evaluate and send: $\boldsymbol{M}_{i1} = [\boldsymbol{X}_{ik} \: \boldsymbol{Z}_{ik}]^T \boldsymbol{W}_{ik} [\boldsymbol{X}_{ik} \: \boldsymbol{Z}_{ik}]$ and $\boldsymbol{M}_{i2} = [\boldsymbol{X}_{ik} \: \boldsymbol{Z}_{ik}]^T \boldsymbol{W}_{ik} \boldsymbol{z}_{ik}$. \\
+                5. (Central) Update $[\beta_k^T \: \gamma_k^T] = (\sum_{i = 1}^m \boldsymbol{M}_{i1} + \lambda_k \boldsymbol{P}_k)^{-1}(\sum_{i = 1}^m \boldsymbol{M}_{i2})$. \\ 
+            }
+        }
+    }
+  }
+\caption{Distributed RS Algorithm}
+\label{myalg}
+\end{algorithm}
+
+My alg (\@ref(myalg))
+My LyX table (\@ref(lyxtab2))
+
+
+## Distributed RS algorithm
+
+for settings where patient-level data is distributed across multiple centers and direct transfer of the patient-level data is not allowed.
+
+
+<!--chapter:end:02-methods.Rmd-->
+

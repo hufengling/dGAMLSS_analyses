@@ -1,0 +1,77 @@
+---
+title: "dGAMLSS: An exact, distributed algorithm to fit Generalized Additive Models for Location, Scale, and Shape for privacy-preserving biomedical normative modeling"
+author:
+  - Fengling Hu:
+      email: fengling.hu@pennmedicine.upenn.edu; 423 Guardian Dr, Philadelphia, PA 19104
+      institute: pennsive
+      correspondence: true
+  - name: Jiayi Tong
+    institute: penncil
+  - name: Margaret Gardner
+    institute: braingene
+  - name: Lifespan Brain Chart Consortium
+  - name: Andrew A. Chen
+    institute: musc
+  - name: Richard A.I. Bethlehem
+    institute: cambridge
+  - name: Jakoeb Seidlitz
+    institute: [braingene, lifespan, psych, choppsych]
+  - name: Aaron Alexander-Bloch
+    institute: [braingene, lifespan, psych, choppsych]
+  - name: Yong Chen
+    institute: penncil
+  - name: Russell T. Shinohara
+    institute: [pennsive, cbica]
+    
+institute:
+  - pennsive: Penn Statistics in Imaging and Visualization Endeavor (PennSIVE), Department of Biostatistics, Epidemiology, and Informatics, Perelman School of Medicine, University of Pennsylvania
+  - penncil: Penn Computing, Inference, and Learning Lab (PennCIL), Department of Biostatistics, Epidemiology, and Informatics, Perelman School of Medicine, University of Pennsylvania
+  - braingene: Brain-Gene-Development Lab, The Children’s Hospital of Philadelphia
+  - musc: Medical University of South Carolina
+  - cambridge: Department of Psychology, University of Cambridge
+  - lifespan: Lifespan Brain Institute, The Children’s Hospital of Philadelphia
+  - psych: Department of Psychiatry, University of Pennsylvania
+  - childpsych: Department of Child and Adolescent Psychiatry and Behavioral Science, The Children's Hospital of Philadelphia
+  - cbica: Center for Biomedical Image Computing and Analytics (CBICA), Perelman School of Medicine, University of Pennsylvania
+date: '`r format(Sys.time(), "%d %B, %Y")`'
+site: bookdown::bookdown_site
+output:
+  bookdown::word_document2:
+    fig_caption: yes
+    number_sections: yes
+    global_numbering: yes
+    md_extensions: +footnotes
+    reference_docx: word_style_reference.docx
+    extra_dependencies: ["algorithm2e", "algorithmic"]
+    pandoc_args:
+      - '--lua-filter=scholarly-metadata.lua'
+      - '--lua-filter=author-info-blocks.lua'
+    toc: no
+  bookdown::pdf_document2:
+    fig_caption: yes
+    number_sections: yes
+    global_numbering: yes
+    toc: no
+bibliography: references.bib
+fontsize: 12pt
+link-citations: yes
+csl: https://raw.githubusercontent.com/citation-style-language/styles/master/biometrics.csl
+---
+
+# CRediT author statement {-}
+
+**Fengling Hu:** Conceptualization, Methodology, Software, Validation, Formal Analysis, Investigation, Data Curation, Writing -- Original Draft, Writing -- Review & Editing, Visualization. 
+**Jiayi Tong:** Methodology, Validation, Resources, Investigation, Writing -- Review & Editing.
+**Yong Chen:** Methodology, Validation, Resources, Investigation, Writing -- Review & Editing, Supervision.
+**Russell T. Shinohara:** Conceptualization, Methodology, Validation, Resources, Investigation, Writing -- Review & Editing, Supervision, Project administration, Funding acquisition.
+
+# Disclosures and Conflicts of Interest {-}
+TODO
+
+# Funding {-}
+TODO
+
+```{r include = FALSE}
+knitr::opts_chunk$set(fig.width=5, fig.height=3.5, echo = FALSE, warning = FALSE, message = FALSE) 
+```
+\newpage

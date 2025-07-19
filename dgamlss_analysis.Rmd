@@ -1,0 +1,561 @@
+---
+title: "Untitled"
+author: "Fengling Hu"
+date: "2024-05-02"
+output: html_document
+---
+
+# Load functions
+```{r}
+library(tidyverse)
+library(here)
+library(Matrix)
+
+library(gamlss)
+library(gamlss.dist)
+library(mgcv)
+library(survival)
+
+for (f in list.files(here("../dgamlss/R"), full.names = TRUE)) {
+  source(f)
+}
+
+data(abdom)
+abdom_1 <- abdom[1:110, ]
+abdom_2 <- abdom[111:610, ]
+```
+
+# Simulation
+```{r}
+set.seed(10)
+n <- 10000
+intercept <- 200
+b_x1 <- 2
+b_x2 <- 100
+b_x3 <- 25
+b_var <- 0.01
+
+site <- rep(0:1, each = n / 2)
+x1 <- rep(1:250, each = n / 250)
+x2 <- rep(1:2, n / 2)
+x3 <- site
+y <- rNO(n, intercept + x1 * b_x1 + x2 * b_x2 + x3 * b_x3, exp(1 + x1 * b_var))
+plot(x1, y)
+plot(x2, y)
+
+df <- data.frame(x1 = x1, x2 = x2, x3 = x3, y = y, site = site)
+df_0 <- df %>% filter(site == 0)
+df_1 <- df %>% filter(site == 1)
+```
+
+# Check GAMLSS vs GAM
+```{r}
+pooled_abdom_gam <- gam(y ~ s(x, bs = "bs"), data = abdom)
+summary(pooled_abdom_gam)
+pooled_abdom_gam$aic
+pooled_abdom_gamlss <- gamlss(y ~ pb(x), sigma.fo = y ~ 1, family = NO, data = abdom)
+summary(pooled_abdom_gamlss)
+edfAll(pooled_abdom_gamlss)
+pooled_abdom_gamlss$aic
+```
+
+# Abdom dataset with spline (Non-orthogonal)
+```{r}
+site1_bs <- dgamlss_bs(abdom_1$x, 12.29, 42.43, spline_name = "b", n_inner_knots = 4,
+                       orthogonalize = FALSE)
+site2_bs <- dgamlss_bs(abdom_2$x, 12.29, 42.43, spline_name = "b", n_inner_knots = 4,
+                       orthogonalize = FALSE)
+pooled_bs <- dgamlss_bs(abdom$x, 12.29, 42.43, spline_name = "b", n_inner_knots = 4, 
+                        orthogonalize = FALSE)
+
+abdom_1_bs <- abdom_1 %>% cbind(site1_bs)
+abdom_2_bs <- abdom_2 %>% cbind(site2_bs)
+abdom_bs <- abdom %>% cbind(pooled_bs)
+
+site1_abdom <- gamlss(y ~ b1 + b2 + b3 + b4 + b5 + b6 - 1, 
+                      sigma.fo = ~ x, family = BCT, 
+                      data = abdom_1_bs); summary(site1_abdom)
+site2_abdom <- gamlss(y ~ b1 + b2 + b3 + b4 + b5 + b6 - 1, 
+                      sigma.fo = ~ x, family = BCT, 
+                      data = abdom_2_bs); summary(site2_abdom)
+pooled_abdom <- gamlss(y ~ b1 + b2 + b3 + b4 + b5 + b6 - 1, 
+                       sigma.fo = ~ x, family = BCT, 
+                       data = abdom_bs); summary(pooled_abdom)
+pooled_abdom_ortho <- gamlss(y ~ ortho_design, 
+                             sigma.fo = ~ x, family = BCT, 
+                             data = abdom_bs); summary(pooled_abdom_ortho)
+pooled_abdom_pb <- gamlss(y ~ pb(x), 
+                          sigma.fo = ~ x, family = BCT, 
+                          data = abdom_bs); summary(pooled_abdom_pb)
+gamlss::fittedPlot(pooled_abdom, x = abdom$x)
+centiles(pooled_abdom_pb, xlim = c(10, 45), ylim = c(50, 400))
+
+dgamlss_abdom <- dgamlss_coordinating(mu.formula = "y ~ b1 + b2 + b3 + b4 + b5 + b6 - 1",
+                                      sigma.formula = "y ~ x",
+                                      family = BCT,
+                                      coef_crit = 0.01,
+                                      site_data = list(abdom_1_bs, abdom_2_bs),
+                                      all_inits = dgamlss_get_inits(site2_abdom)); dgamlss_abdom
+
+dgamlss_abdom_output <- dgamlss_create_summary(site1_abdom, 
+                                               dgamlss_abdom,
+                                               dgamlss_get_hessian(site1_abdom, 
+                                                                   dgamlss_abdom) + 
+                                                 dgamlss_get_hessian(site2_abdom, 
+                                                                     dgamlss_abdom),
+                                               pooled_n = 610)
+dgamlss_summary(dgamlss_abdom_output)
+
+family <- as.gamlss.family(BCT())
+x_val <- seq(12.29, 42.43, by = 0.05)
+design_matrix_list <- list(dgamlss_bs(x_val, 12.29, 42.43, n_inner_knots = 4),
+                           matrix(c(rep(1, 603), x_val), ncol = 2), 
+                           matrix(rep(1, 603), ncol = 1),
+                           matrix(rep(1, 603), ncol = 1))
+dgamlss_fitted_plot(dgamlss_abdom_output,
+                    family = family,
+                    x_val = x_val,
+                    design_matrix_list = design_matrix_list)
+dgamlss_centiles(dgamlss_abdom_output, 
+                 family, 
+                 x_val, 
+                 design_matrix_list,
+                 points = F,
+                 xlim = c(10, 45), ylim = c(50, 400))
+```
+
+# Abdom dataset with spline (Orthogonal)
+```{r}
+site1_bs <- dgamlss_bs(abdom_1$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = 4)
+site2_bs <- dgamlss_bs(abdom_2$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = 4)
+pooled_bs <- dgamlss_bs(abdom$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = 4)
+
+abdom_1_bs <- abdom_1 %>% cbind(site1_bs)
+abdom_2_bs <- abdom_2 %>% cbind(site2_bs)
+abdom_bs <- abdom %>% cbind(pooled_bs)
+
+site1_abdom <- gamlss(y ~ b_1 + b_2 + b_3 + b_4 + b_5, 
+                      sigma.fo = ~ x, family = BCT, 
+                      data = abdom_1_bs); summary(site1_abdom)
+site2_abdom <- gamlss(y ~ b_1 + b_2 + b_3 + b_4 + b_5, 
+                      sigma.fo = ~ x, family = BCT, 
+                      data = abdom_2_bs); summary(site2_abdom)
+pooled_abdom <- gamlss(y ~ b_1 + b_2 + b_3 + b_4 + b_5, 
+                       sigma.fo = ~ x, family = BCT, 
+                       data = abdom_bs); summary(pooled_abdom)
+pooled_abdom_pb <- gamlss(y ~ pb(x), 
+                          sigma.fo = ~ x, family = BCT, 
+                          data = abdom_bs); summary(pooled_abdom_pb)
+gamlss::fittedPlot(pooled_abdom, x = abdom$x)
+centiles(pooled_abdom_pb, xlim = c(10, 45), ylim = c(50, 400))
+
+dgamlss_abdom <- dgamlss_coordinating(mu.formula = "y ~ b_1 + b_2 + b_3 + b_4 + b_5",
+                                      sigma.formula = "y ~ x",
+                                      family = BCT,
+                                      coef_crit = 0.01,
+                                      site_data = list(abdom_1_bs, abdom_2_bs),
+                                      all_inits = dgamlss_get_inits(site2_abdom)); dgamlss_abdom
+pooled_hessian <- dgamlss_get_hessian(site1_abdom, dgamlss_abdom) + dgamlss_get_hessian(site2_abdom, dgamlss_abdom)
+dgamlss_abdom_output <- dgamlss_create_summary(site1_abdom, 
+                                               dgamlss_abdom,
+                                               pooled_hessian,
+                                               pooled_n = 610,
+                                               spline_prefix = list(mu = "b_"))
+dgamlss_summary(dgamlss_abdom_output)
+
+family <- as.gamlss.family(BCT())
+x_val <- seq(12.29, 42.43, by = 0.05)
+design_matrix_list <- list(dgamlss_bs(x_val, 12.29, 42.43, n_inner_knots = 4),
+                           matrix(c(rep(1, 603), x_val), ncol = 2), 
+                           matrix(rep(1, 603), ncol = 1),
+                           matrix(rep(1, 603), ncol = 1))
+dgamlss_fitted_plot(dgamlss_abdom_output,
+                    family = family,
+                    x_val = x_val,
+                    design_matrix_list = design_matrix_list)
+dgamlss_centiles(dgamlss_abdom_output, 
+                 family, 
+                 x_val, 
+                 design_matrix_list,
+                 points = F,
+                 xlim = c(10, 45), ylim = c(50, 400))
+```
+
+# Abdom with orthogonal penalized spline
+```{r}
+n_knots <- 98
+mu_formula <- paste0("y ~ ", paste0("b_", 1:(n_knots + 1), collapse = " + "))
+
+site1_bs <- dgamlss_bs(abdom_1$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = n_knots, 
+                       orthogonalize = TRUE)
+site2_bs <- dgamlss_bs(abdom_2$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = n_knots,
+                       orthogonalize = TRUE)
+pooled_bs <- dgamlss_bs(abdom$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = n_knots,
+                        orthogonalize = TRUE)
+
+abdom_1_bs <- abdom_1 %>% cbind(site1_bs)
+abdom_2_bs <- abdom_2 %>% cbind(site2_bs)
+abdom_bs <- abdom %>% cbind(pooled_bs)
+
+site1_abdom <- gamlss_mock_fit(formula(mu_formula), 
+                               sigma.fo = ~ 1, family = BCT, 
+                               data = abdom_1_bs)#; summary(site1_abdom)
+site2_abdom <- gamlss(formula(mu_formula), 
+                      sigma.fo = ~ 1, family = BCT, 
+                      data = abdom_2_bs); summary(site2_abdom)
+pooled_abdom <- gamlss(formula(mu_formula), 
+                       sigma.fo = ~ 1, family = BCT, 
+                       data = abdom_bs); summary(pooled_abdom)
+fittedPlot(pooled_abdom, x = abdom$x)
+centiles(pooled_abdom, abdom$x)
+pooled_abdom_pb <- gamlss(y ~ pb(x), 
+                          sigma.fo = ~ 1, family = BCT, 
+                          data = abdom_bs); summary(pooled_abdom_pb)
+gamlss::fittedPlot(pooled_abdom_pb, x = abdom$x)
+centiles(pooled_abdom_pb, xlim = c(10, 45), ylim = c(50, 400))
+
+penalty_matrix_list <- generate_penalty_matrix(site1_abdom,
+                                               smooth_penalty_list = list(mu = attr(site1_bs, "P")),
+                                               smooth_index_list = list(mu = c(0, rep(1, n_knots + 1))))
+lambda_list <- list(mu = 0)
+dgamlss_abdom <- dgamlss_coordinating(mu.formula = mu_formula,
+                                      sigma.formula = "~ 1",
+                                      family = BCT,
+                                      coef_crit = 0.01,
+                                      site_data = list(abdom_1_bs, abdom_2_bs),
+                                      all_inits = NULL,
+                                      mu_init = 200, 
+                                      init_lengths = c(n_knots + 2, 1, 1, 1),
+                                      lambda_list = lambda_list,
+                                      penalty_matrix_list = penalty_matrix_list); dgamlss_abdom
+inference <- list(dgamlss_get_inference(site1_abdom, dgamlss_abdom, "mu"),
+                  dgamlss_get_inference(site2_abdom, dgamlss_abdom, "mu"))
+pooled_inference <- dgamlss_aggregate_inference(inference, dgamlss_abdom,
+                                                lambda_list, 
+                                                penalty_matrix_list); pooled_inference
+dgamlss_abdom_output <- dgamlss_create_summary(site1_abdom, 
+                                               dgamlss_abdom,
+                                               dgamlss_abdom$global_deviance,
+                                               pooled_inference,
+                                               spline_prefix = list(mu = "b_"))
+dgamlss_summary(dgamlss_abdom_output)
+
+x_val <- seq(12.29, 42.43, by = 0.05)
+design_matrix_list <- list(cbind(rep(1, 603), dgamlss_bs(x_val, 12.29, 42.43, n_inner_knots = n_knots, 
+                                            orthogonalize = TRUE)),
+                           matrix(rep(1, 603), ncol = 1), 
+                           matrix(rep(1, 603), ncol = 1),
+                           matrix(rep(1, 603), ncol = 1))
+dgamlss_fitted_plot(dgamlss_abdom_output,
+                    x_val = x_val,
+                    design_matrix_list = design_matrix_list)
+dgamlss_centiles(dgamlss_abdom_output,
+                 x_val, 
+                 design_matrix_list,
+                 points = F,
+                 xlim = c(10, 45), ylim = c(50, 400))
+```
+
+# Abdom with non-orthogonal spline
+```{r}
+n_knots <- 98
+mu_formula <- paste0("y ~ -1 + ", paste0("b_", 1:(n_knots + 2), collapse = " + "))
+
+site1_bs <- dgamlss_bs(abdom_1$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = n_knots, 
+                       orthogonalize = FALSE)
+site2_bs <- dgamlss_bs(abdom_2$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = n_knots,
+                       orthogonalize = FALSE)
+pooled_bs <- dgamlss_bs(abdom$x, 12.29, 42.43, spline_prefix = "b", n_inner_knots = n_knots,
+                        orthogonalize = FALSE)
+
+abdom_1_bs <- abdom_1 %>% cbind(site1_bs)
+abdom_2_bs <- abdom_2 %>% cbind(site2_bs)
+abdom_bs <- abdom %>% cbind(pooled_bs)
+
+site1_abdom <- gamlss_mock_fit(formula(mu_formula), 
+                               sigma.fo = ~ 1, family = BCT, 
+                               data = abdom_1_bs)#; summary(site1_abdom)
+site2_abdom <- gamlss(formula(mu_formula), 
+                      sigma.fo = ~ 1, family = BCT, 
+                      data = abdom_2_bs); summary(site2_abdom)
+pooled_abdom <- gamlss(formula(mu_formula), 
+                       sigma.fo = ~ 1, family = BCT, 
+                       data = abdom_bs); summary(pooled_abdom)
+fittedPlot(pooled_abdom, x = abdom$x)
+centiles(pooled_abdom, abdom$x)
+pooled_abdom_pb <- gamlss(y ~ pb(x), 
+                          sigma.fo = ~ 1, family = BCT, 
+                          data = abdom_bs); summary(pooled_abdom_pb)
+gamlss::fittedPlot(pooled_abdom_pb, x = abdom$x)
+centiles(pooled_abdom_pb, xlim = c(10, 45), ylim = c(50, 400))
+
+penalty_matrix_list <- generate_penalty_matrix(site1_abdom,
+                                               smooth_penalty_list = list(mu = attr(site1_bs, "P")),
+                                               smooth_index_list = list(mu = c(rep(1, 100))))
+lambda_list <- list(mu = 0)
+dgamlss_abdom <- dgamlss_coordinating(mu.formula = mu_formula,
+                                      sigma.formula = "~ 1",
+                                      family = BCT,
+                                      coef_crit = 0.01,
+                                      site_data = list(abdom_1_bs, abdom_2_bs),
+                                      all_inits = NULL,
+                                      mu_init = rep(200, n_knots + 2), 
+                                      init_lengths = c(n_knots + 2, 1, 1, 1),
+                                      lambda_list = lambda_list,
+                                      penalty_matrix_list = penalty_matrix_list); dgamlss_abdom
+inference <- list(dgamlss_get_inference(site1_abdom, dgamlss_abdom, "mu"),
+                  dgamlss_get_inference(site2_abdom, dgamlss_abdom, "mu"))
+pooled_inference <- dgamlss_aggregate_inference(inference, dgamlss_abdom,
+                                                lambda_list, 
+                                                penalty_matrix_list); pooled_inference
+dgamlss_abdom_output <- dgamlss_create_summary(site1_abdom, 
+                                               dgamlss_abdom,
+                                               dgamlss_abdom$global_deviance,
+                                               pooled_inference,
+                                               spline_prefix = list(mu = "b_"))
+dgamlss_summary(dgamlss_abdom_output)
+
+x_val <- seq(12.29, 42.43, by = 0.05)
+design_matrix_list <- list(cbind(dgamlss_bs(x_val, 12.29, 42.43, n_inner_knots = n_knots, 
+                                            orthogonalize = FALSE)),
+                           matrix(rep(1, 603), ncol = 1), 
+                           matrix(rep(1, 603), ncol = 1),
+                           matrix(rep(1, 603), ncol = 1))
+dgamlss_fitted_plot(dgamlss_abdom_output,
+                    x_val = x_val,
+                    design_matrix_list = design_matrix_list)
+dgamlss_centiles(dgamlss_abdom_output,
+                 x_val, 
+                 design_matrix_list,
+                 points = F,
+                 xlim = c(10, 45), ylim = c(50, 400))
+```
+# GCV test
+
+```{r}
+mu_vec <- exp(seq(-10, 10, by = 1))
+
+mu_gcvs <- lapply(mu_vec, function(mu) {
+  lambda_list <- list(mu = mu)
+  dgamlss_abdom <- dgamlss_coordinating(mu.formula = mu_formula,
+                                        sigma.formula = "~ 1",
+                                        family = BCT,
+                                        coef_crit = 0.01,
+                                        local_site_data = abdom_1_bs,
+                                        site_data = list(abdom_1_bs, abdom_2_bs),
+                                        lambda_list = lambda_list,
+                                        penalty_matrix_list = penalty_matrix_list)
+  inference <- list(dgamlss_get_inference(site1_abdom, dgamlss_abdom, "mu"),
+                    dgamlss_get_inference(site2_abdom, dgamlss_abdom, "mu"))
+  pooled_inference <- dgamlss_aggregate_inference(inference, 
+                                                  dgamlss_abdom,
+                                                  lambda_list, 
+                                                  penalty_matrix_list)
+  dgamlss_abdom_output <- dgamlss_create_summary(site1_abdom, 
+                                                 dgamlss_abdom,
+                                                 dgamlss_abdom$global_deviance,
+                                                 pooled_inference,
+                                                 spline_prefix = list(mu = "b_"))
+  c(dgamlss_abdom_output$df.fit, 
+    dgamlss_abdom_output$G.deviance,
+    dgamlss_abdom_output$sbc, 
+    dgamlss_abdom_output$aic, 
+    dgamlss_abdom$n_communications)
+}) %>% do.call(rbind, .) %>% cbind(mu_vec)
+```
+
+# Spline penalty exploration
+```{r}
+sine <- data.frame(x = seq(0, 8, by = 0.01), y = rnorm(801, sin(seq(1, 8, by = 0.01)), 0.2))
+X <- dgamlss_bs(sine$x, 0, 8, spline_prefix = "b", n_inner_knots = 10)
+X_cs <- dgamlss_cs(sine$x, 0, 8, spline_prefix = "b", n_inner_knots = 10)
+pen <- t(attr(X, "D")) %*% attr(X, "D")
+fixed <- model.matrix(y ~ x, data = sine)
+
+int <- lm(y ~ 1, data = sine) 
+lin <- lm(y ~ x, data = sine)
+smooth <- lm(y ~ X - 1, data = sine) 
+smooth_cs <- lm(y ~ X_cs, data = sine)
+
+anova(int, lin, test = "LRT")
+anova(lin, smooth, test = "LRT")
+```
+
+```{r}
+plot(sine$x, sine$y, cex = 0.1)
+lines(sine$x, fixed %*% solve(t(fixed) %*% fixed) %*% t(fixed) %*% sine$y, col = "red")
+lines(sine$x, X %*% solve(t(X) %*% X) %*% t(X) %*% sine$y, col = "green")
+lines(sine$x, X %*% solve(t(X) %*% X + 1 * pen) %*% t(X) %*% sine$y, col = "blue")
+```
+
+```{r}
+X_wi <- cbind(rep(1, 81), X)
+pen_wi <- rbind(rep(0, ncol(X_wi)), cbind(rep(0, ncol(X)), pen))
+
+plot(sine$x, sine$y, cex = 0.1)
+lines(sine$x, fixed %*% solve(t(fixed) %*% fixed) %*% t(fixed) %*% sine$y, col = "red")
+lines(sine$x, X_wi %*% solve(t(X_wi) %*% X_wi) %*% t(X_wi) %*% sine$y, col = "green")
+lines(sine$x, X_wi %*% solve(t(X_wi) %*% X_wi + pen_wi) %*% t(X_wi) %*% sine$y, col = "blue")
+lines(sine$x, X_wi %*% solve(t(X_wi) %*% X_wi + 1000000 * pen_wi) %*% t(X_wi) %*% sine$y, col = "black")
+```
+
+```{r}
+X_cs_wi <- cbind(rep(1, 81), X_cs)
+pen <- attr(X_cs, "P")
+pen_wi <- rbind(rep(0, nrow(pen) + 1), cbind(rep(0, nrow(pen)), pen))
+
+plot(sine$x, sine$y, cex = 0.1)
+lines(sine$x, fixed %*% solve(t(fixed) %*% fixed) %*% t(fixed) %*% sine$y, col = "red")
+lines(sine$x, X_cs_wi %*% solve(t(X_cs_wi) %*% X_cs_wi) %*% t(X_cs_wi) %*% sine$y, col = "green")
+lines(sine$x, X_cs_wi %*% solve(t(X_cs_wi) %*% X_cs_wi + 10 * pen_wi) %*% t(X_cs_wi) %*% sine$y, col = "blue")
+lines(sine$x, X_cs_wi %*% solve(t(X_cs_wi) %*% X_cs_wi + 1000000 * pen_wi) %*% t(X_cs_wi) %*% sine$y, col = "black")
+```
+
+# ADNI 
+```{r}
+adni <- read.csv("./data/ADNI_ANTsSST_protocol_2019_03_14.csv")
+adni <- adni[!duplicated(adni$subid), ] %>% 
+  select(site, AGE, SEX, DIAGNOSIS, starts_with("thickness")) %>% 
+  mutate(SEX01 = ifelse(SEX == "M", 1, 0)) %>% 
+  filter(site != 72, site != 121, site != 132)
+
+adni_bs <- dgamlss_bs(adni$AGE, 55, 92, spline_prefix = "age_spline", n_inner_knots = 4)
+adni <- adni %>% cbind(adni_bs)
+
+adni_by_site <- lapply(unique(adni$site), function(site_id) {
+  adni$DIAGNOSIS <- as.factor(adni$DIAGNOSIS)
+  adni$SEX <- as.factor(adni$SEX)
+  tmp <- adni %>% filter(site == site_id) %>%
+    select(AGE, SEX, SEX01, DIAGNOSIS, starts_with("thickness"), starts_with("age_spline"))
+  if (nrow(tmp) == 1) {
+    print(site_id)
+    return(NULL)
+  } 
+  tmp
+})
+```
+
+# Baseline model
+```{r}
+pooled_adni <- gamlss(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                      sigma.fo = ~ AGE, family = BCT, 
+                      data = adni, 
+                      i.control = glim.control(glm.trace = TRUE)); summary(pooled_adni)
+site1_adni <- gamlss(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                     sigma.fo = ~ AGE, family = BCT, 
+                     data = adni_by_site[[1]]); summary(site1_adni)
+
+dgamlss_adni <- dgamlss_coordinating(mu.formula = "thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS",
+                                     sigma.formula = "~ AGE",
+                                     family = BCT,
+                                     coef_crit = 0.005,
+                                     site_data = adni_by_site,
+                                     mu_init = 1.5,
+                                     init_lengths = c(5, 2, 1, 1)); dgamlss_adni
+pooled_hessian <- list()
+for (i in 1:length(adni_by_site)) {
+  print(i)
+  site_gamlss <- gamlss_mock_fit(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                                 sigma.fo = ~ AGE, family = BCT, 
+                                 data = adni_by_site[[i]])
+  pooled_hessian <- append(pooled_hessian, list(dgamlss_get_hessian(site_gamlss, dgamlss_adni)))
+}
+pooled_hessian <- Reduce("+", pooled_hessian)
+
+pooled_hessian <- lapply(adni_by_site, function(site) {
+  site_gamlss <- gamlss(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                        sigma.fo = ~ AGE, family = BCT, 
+                        data = site)
+  dgamlss_get_hessian(site_gamlss, dgamlss_adni)
+}) %>% Reduce("+", .)
+
+dgamlss_adni_output <- dgamlss_create_summary(site1_adni, 
+                                              dgamlss_adni,
+                                              pooled_hessian,
+                                              pooled_n = 660)
+dgamlss_summary(dgamlss_adni_output)
+```
+
+# Fixed spline model
+```{r}
+pooled_adni <- gamlss(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                      sigma.fo = ~ AGE, family = BCT, 
+                      data = adni, 
+                      i.control = glim.control(glm.trace = TRUE)); summary(pooled_adni)
+site1_adni <- gamlss(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                     sigma.fo = ~ AGE, family = BCT, 
+                     data = adni_by_site[[1]]); summary(site1_adni)
+
+dgamlss_adni <- dgamlss_coordinating(mu.formula = "thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS",
+                                     sigma.formula = "~ AGE",
+                                     family = BCT,
+                                     coef_crit = 0.005,
+                                     site_data = adni_by_site,
+                                     mu_init = 1.5,
+                                     init_lengths = c(5, 2, 1, 1)); dgamlss_adni
+pooled_hessian <- list()
+for (i in 1:length(adni_by_site)) {
+  print(i)
+  site_gamlss <- gamlss_mock_fit(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                                 sigma.fo = ~ AGE, family = BCT, 
+                                 data = adni_by_site[[i]])
+  pooled_hessian <- append(pooled_hessian, list(dgamlss_get_hessian(site_gamlss, dgamlss_adni)))
+}
+pooled_hessian <- Reduce("+", pooled_hessian)
+
+pooled_hessian <- lapply(adni_by_site, function(site) {
+  site_gamlss <- gamlss(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                        sigma.fo = ~ AGE, family = BCT, 
+                        data = site)
+  dgamlss_get_hessian(site_gamlss, dgamlss_adni)
+}) %>% Reduce("+", .)
+
+dgamlss_adni_output <- dgamlss_create_summary(site1_adni, 
+                                              dgamlss_adni,
+                                              pooled_hessian,
+                                              pooled_n = 660)
+dgamlss_summary(dgamlss_adni_output)
+```
+
+# Binomial model
+```{r}
+pooled_adni <- gamlss(SEX01 ~ AGE + DIAGNOSIS, 
+                      family = BI, 
+                      data = adni, 
+                      i.control = glim.control(glm.trace = TRUE)); summary(pooled_adni)
+site1_adni <- gamlss(SEX01 ~ AGE + DIAGNOSIS, 
+                     family = BI, 
+                     data = adni_by_site[[1]], 
+                     i.control = glim.control(glm.trace = TRUE)); summary(pooled_adni)
+
+dgamlss_adni <- dgamlss_coordinating(mu.formula = "SEX01 ~ AGE + DIAGNOSIS",
+                                     family = BI,
+                                     coef_crit = 0.005,
+                                     site_data = adni_by_site,
+                                     mu_init = 0.5,
+                                     init_lengths = c(4)); dgamlss_adni
+pooled_hessian <- list()
+for (i in 1:length(adni_by_site)) {
+  print(i)
+  site_gamlss <- gamlss_mock_fit(SEX01 ~ AGE + DIAGNOSIS,
+                                 family = BI,
+                                 data = adni_by_site[[i]])
+  pooled_hessian <- append(pooled_hessian, 
+                           list(dgamlss_get_hessian(site_gamlss, dgamlss_adni)))
+}
+pooled_hessian <- Reduce("+", pooled_hessian)
+
+pooled_hessian <- lapply(adni_by_site, function(site) {
+  site_gamlss <- gamlss(thickness.left.cuneus ~ AGE + SEX + DIAGNOSIS,
+                        sigma.fo = ~ AGE, family = BCT, 
+                        data = site)
+  dgamlss_get_hessian(site_gamlss, dgamlss_adni)
+}) %>% Reduce("+", .)
+
+dgamlss_adni_output <- dgamlss_create_summary(site1_adni, 
+                                              dgamlss_adni,
+                                              pooled_hessian,
+                                              pooled_n = 660)
+dgamlss_summary(dgamlss_adni_output)
+```
+

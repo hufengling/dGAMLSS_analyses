@@ -1,0 +1,536 @@
+---
+title: "microbiome"
+author: "Fengling Hu"
+date: "2024-06-07"
+output: html_document
+---
+
+# Load libraries
+
+```{r collapse=TRUE}
+library(ggplot2)
+library(tidyverse)
+library(viridis)
+#library(broom)
+#library(dplyr)
+#library(gt)
+library(formula.tools)
+#library(logger)
+library(future.apply)
+#library(meta)
+#library(kableExtra)
+library(caret)
+library(here)
+library(gamlss)
+library(dgamlss)
+# Notebook settings
+future::plan("multisession", workers = 4)
+options(scipen = 999)
+
+# Load utility scripts
+source(here("data/microbiome-metabolome-curated-data-main/scripts/data_organization/utils.R"))
+source(here("data/microbiome-metabolome-curated-data-main/scripts/data_analysis/hmdb_utils.R"))
+
+gamlss_centiles <- function(prediction,
+                            continuous_var,
+                            centiles = c(0.4, 2, 10, 25, 50, 75, 90, 98, 99.6)) {
+  parameters <- names(test)[names(test) %in% c("mu", "sigma", "nu", "tau")]
+  centile_order <- order(continuous_var)
+  dgamlss_prediction <- list(
+    mu.fv = if ("mu" %in% parameters) {
+      prediction$mu},
+    sigma.fv = if ("sigma" %in% parameters) {
+      prediction$sigma},
+    nu.fv = if ("nu" %in% parameters) {
+      prediction$nu},
+    tau.fv = if ("tau" %in% parameters) {
+      prediction$tau})
+  
+  qFamily <- match.fun(paste0("q", attr(prediction, "family")[1]))
+  
+  dgamlss_prediction$centiles <- vector("list", length(centiles))
+  for (i in 1:length(centiles)) {
+    if (length(parameters) == 1) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 2) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv,
+                       dgamlss_prediction$sigma.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 3) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv, dgamlss_prediction$sigma.fv,
+                       dgamlss_prediction$nu.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 4) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv, dgamlss_prediction$sigma.fv,
+                       dgamlss_prediction$nu.fv, dgamlss_prediction$tau.fv)[centile_order],
+        centile = centiles[i])
+    }
+  }
+  
+  centiles_df <- data.frame(do.call(rbind, dgamlss_prediction$centiles))
+  centiles_df$centile <- as.factor(centiles_df$centile)
+  
+  centile_plot <- ggplot(centiles_df, aes(x, pred, color = fct_rev(centile))) +
+    geom_line()
+  return(list(plot = centile_plot,
+              df = centiles_df))
+}
+```
+
+# Load all data
+
+```{r}
+all.data <- load.all.datasets(here("data/microbiome-metabolome-curated-data-main/data/processed_data/"))
+for(i in 1:length(all.data)) assign(names(all.data)[i], all.data[[i]])
+rm(all.data)
+
+# Remove subjects from YACHIDA_CRC_2019 study that are also in ERAWIJANTARI_GASTRIC_CANCER_2020 study:
+
+metadata$YACHIDA_CRC_2019 <- metadata$YACHIDA_CRC_2019 %>%
+  filter(! Shared.w.ERAWIJANTARI_2020)
+updated.yachida.sample.list <- metadata$YACHIDA_CRC_2019$Sample
+mtb$YACHIDA_CRC_2019 <- mtb$YACHIDA_CRC_2019 %>% filter(Sample %in% updated.yachida.sample.list)
+genera$YACHIDA_CRC_2019 <- genera$YACHIDA_CRC_2019 %>% filter(Sample %in% updated.yachida.sample.list)
+```
+
+# Combine individual species into phyla
+
+```{r}
+for (i in 1:14) {
+  metadata[[i]]$Sample <- as.character(metadata[[i]]$Sample)
+}
+
+genera <- genera[c(-2, -12)]
+metadata <- metadata[c(-2, -12)]
+
+metadata$iHMP_IBDMDB_2019 <- metadata$iHMP_IBDMDB_2019 %>% 
+  rename(Age = consent_age)
+metadata$POYET_BIO_ML_2019 <- metadata$POYET_BIO_ML_2019 %>% 
+  mutate(Study.Group = "Control")
+
+genera_phyla <- mapply(function(genera_df, metadata_df) {
+  metadata_df_reduced <- metadata_df %>% 
+    select(Sample, Dataset, Subject, Study.Group, Age, Age.Units, Gender)
+  dataset_phyla <- genera_df %>% 
+    group_by(Sample) %>% 
+    summarize(bact_prop = sum(across(contains("p__Bacteroidota"))),
+              acti_prop = sum(across(contains("p__Actinobacteriota"))),
+              prot_prop = sum(across(contains("p__Proteobacteria"))),
+              firm_prop = sum(across(contains("p__Firmicutes")))) %>% 
+    select(Sample, bact_prop, acti_prop, prot_prop, firm_prop, everything()) %>% 
+    left_join(metadata_df_reduced, by = "Sample")
+  return(dataset_phyla)
+}, genera, metadata, SIMPLIFY = FALSE)
+
+genera_phyla <- lapply(genera_phyla, \(x) {
+  x %>% dplyr::select(Sample, Dataset, Subject, Study.Group, Age, Age.Units, Gender, 
+                      bact_prop, acti_prop, prot_prop, firm_prop)
+})
+
+df <- do.call(rbind, genera_phyla)
+df$Age <- as.numeric(df$Age)
+df <- df %>% mutate(subject_dataset = paste0(Subject, "_", Dataset),
+                    age_years = case_when(
+                      Age.Units == "Days" ~ Age / 365,
+                      Age.Units == "Months" ~ Age / 12,
+                      Age.Units == "Years" ~ Age)) %>% 
+  filter(!is.na(Age),
+         Study.Group %in% c("0", "Baseline", "C", "control", "Control", 
+                            "H", "Healthy", "Month12", "Neurotypical",
+                            "nonIBD", "Normal", 
+                            "With.comp.food", "Without.comp.food"))
+df <- df[!duplicated(df$subject_dataset), ]
+
+write.csv(df, here("data/microbiome.csv"), row.names = F)
+```
+
+# Load phyla-level data
+```{r}
+microbiome <- read.csv(here("data/microbiome.csv")) %>% 
+  filter(Dataset != "HE_INFANTS_MFGM_2019")
+microbiome_one_hot <- cbind(microbiome[8:11], 
+                            Dataset = microbiome$Dataset,
+                            as.data.frame(predict(dummyVars(~ age_years + Dataset + Gender,
+                                                            data = microbiome, 
+                                                            fullRank = FALSE), 
+                                                  newdata = microbiome))) %>% 
+  mutate(across(c(4, 14), as.numeric))
+microbiome_site <- lapply(unique(microbiome$Dataset), function (site) {
+  microbiome_one_hot %>% filter(Dataset == site)
+})
+```
+
+# Gold standard
+```{r}
+micro_gs <- gamlss(prot_prop ~ pb(age_years) + Dataset + Gender,
+                   sigma.formula = ~ pb(age_years) + Gender,
+                   nu.formula = ~ pb(age_years) + Gender,
+                   data = microbiome, family = BEZI())
+summary(micro_gs)
+edfAll(micro_gs)
+```
+
+# Fixed penalty analysis
+```{r}
+# Make splines
+age_range <- range(microbiome$age_years)
+n_knots <- 20
+
+# Fixed penalty
+microbiome_site_bs <- lapply(microbiome_site, function(site) {
+  site %>%
+    cbind(dgamlss_bs(site$age_years,
+                     age_range[1], age_range[2],
+                     spline_prefix = "age_",
+                     n_knots = n_knots,
+                     orthogonalize = FALSE))
+})
+
+mu_formula <- paste0("prot_prop ~ ", paste0("age_", 1:(n_knots[1] + 2), collapse = " + "), " + DatasetiHMP_IBDMDB_2019 + DatasetJACOBS_IBD_FAMILIES_2016 + DatasetKANG_AUTISM_2017 + DatasetKOSTIC_INFANTS_DIABETES_2015 + DatasetMARS_IBS_2020 + DatasetPOYET_BIO_ML_2019 + DatasetERAWIJANTARI_GASTRIC_CANCER_2020 + DatasetWANG_ESRD_2020 + DatasetYACHIDA_CRC_2019 + GenderMale - 1")
+sigma_nu_formula <- paste0("~ ", paste0("age_", 1:(n_knots[1] + 2), collapse = " + "), " + GenderMale - 1")
+
+site1_microbiome <- gamlss(formula(mu_formula),
+                           sigma.formula = formula(sigma_nu_formula),
+                           nu.formula = formula(sigma_nu_formula),
+                           data = microbiome_site_bs[[1]], family = BEZI())
+site1_bs <- dgamlss_bs(microbiome_site[[1]]$age_years,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_",
+                       n_knots = n_knots,
+                       orthogonalize = FALSE)
+
+penalty_matrix_list <- generate_penalty_matrix(
+  site1_microbiome,
+  smooth_penalty_list = list(mu = attr(site1_bs, "P"),
+                             sigma = attr(site1_bs, "P"),
+                             nu = attr(site1_bs, "P")),
+  smooth_index_list = list(mu = c(rep(1, ncol(site1_bs)),
+                                  numeric(10)),
+                           sigma = c(rep(1, ncol(site1_bs)), 0),
+                           nu = c(rep(1, ncol(site1_bs)), 0)))
+
+xtx_list <- lapply(microbiome_site_bs, function(site) {
+  site_gamlss <- gamlss_mock_fit(formula = formula(mu_formula),
+                                 sigma.formula = formula(sigma_nu_formula),
+                                 nu.formula = formula(sigma_nu_formula),
+                                 family = BEZI(),
+                                 data = site)
+  dgamlss_get_inference(site_gamlss, 
+                        c("mu", "sigma", "nu"))
+})
+
+# Choose lambda such that EDF output from dgamlss_aggregate_inference() is as desired
+lambda_list <- list(mu = 127.35, 
+                    sigma = 370.5, 
+                    nu = 1214); dgamlss_aggregate_inference(xtx_list, 
+                                                                  penalty_matrix_list = penalty_matrix_list,
+                                                                  lambda_list = lambda_list)
+
+# Fit model
+dgamlss_microbiome <- dgamlss_coordinating(
+  mu.formula = mu_formula,
+  sigma.formula = sigma_nu_formula,
+  nu.formula = sigma_nu_formula,
+  family = BEZI,
+  coef_crit = 0.05,
+  local_site_data = microbiome_site_bs[[9]],
+  max_outer_iter = 100,
+  site_data = microbiome_site_bs,
+  penalty_matrix_list = penalty_matrix_list,
+  lambda_list = lambda_list,
+  is_orthogonal = FALSE,
+  verbose = TRUE); dgamlss_microbiome
+
+# Get inference
+inference_list <- vector("list", length(microbiome_site_bs))
+for (i in 1:length(microbiome_site_bs)) {
+  print(i)
+  site_gamlss <- gamlss_mock_fit(formula = formula(mu_formula),
+                                 sigma.formula = formula(sigma_nu_formula),
+                                 nu.formula = formula(sigma_nu_formula),
+                                 family = BEZI(),
+                                 data = microbiome_site_bs[[i]])
+  inference_list[[i]] <- dgamlss_get_inference(site_gamlss, 
+                                               c("mu", "sigma", "nu"),
+                                               dgamlss_microbiome)
+}
+
+# Pool inference
+pooled_inference <- dgamlss_aggregate_inference(inference_list, dgamlss_microbiome,
+                                                penalty_matrix_list = penalty_matrix_list,
+                                                lambda_list = lambda_list); pooled_inference
+dgamlss_microbiome_output <- dgamlss_create_summary(site1_microbiome, 
+                                                    dgamlss_microbiome,
+                                                    dgamlss_microbiome$global_deviance,
+                                                    pooled_inference,
+                                                    spline_prefix = list(mu = "age_",
+                                                                         sigma = "age_",
+                                                                         nu = "age_"))
+dgamlss_summary(dgamlss_microbiome_output)
+
+# Make quantile predictions
+dgamlss_predictions <- dgamlss_predict(
+  dgamlss_microbiome_output,
+  gamlss_mock_fit(formula = formula(mu_formula),
+                  sigma.formula = formula(sigma_nu_formula),
+                  nu.formula = formula(sigma_nu_formula),
+                  family = BEZI(),
+                  data = do.call(rbind, microbiome_site_bs)))
+
+# Gold standard
+pooled_microbiome <- gamlss(formula(mu_formula),
+                            sigma.formula = formula(sigma_nu_formula),
+                            nu.formula = formula(sigma_nu_formula),
+                            data = do.call(rbind, microbiome_site_bs), 
+                            family = BEZI); summary(pooled_microbiome)
+pooled_microbiome_predictions <- pBEZI(pooled_microbiome$y, 
+                                       pooled_microbiome$mu.fv, 
+                                       pooled_microbiome$sigma.fv, 
+                                       pooled_microbiome$nu.fv)
+
+pooled_microbiome_gs <- gamlss(prot_prop ~ pb(age_years) + Dataset + GenderMale, 
+                               ~ pb(age_years) + GenderMale,
+                               ~ pb(age_years) + GenderMale,
+                               data = do.call(rbind, microbiome_site_bs), 
+                               family = BEZI()); summary(pooled_microbiome_gs)
+pooled_microbiome_gs_predictions <- pBEZI(pooled_microbiome_gs$y, 
+                                          pooled_microbiome_gs$mu.fv, 
+                                          pooled_microbiome_gs$sigma.fv, 
+                                          pooled_microbiome_gs$nu.fv)
+
+# Plotting fitted quantiles
+microbiome_predictions <- data.frame(pooled_gs_q = pooled_microbiome_gs_predictions, 
+                                     dgamlss_q = dgamlss_predictions$quantile,
+                                     pooled_gs_y = pooled_microbiome_gs$mu.fv, 
+                                     dgamlss_y = dgamlss_predictions$mu.fv)
+```
+
+# Bootstrapping number of iterations
+```{r}
+n_boot <- 100
+micro_dfs <- unique(microbiome$Dataset)
+dgamlss_microbiome_boot <- lapply(1:n_boot, function(iter) {
+  print(iter)
+  tmp_microbiome <- microbiome_one_hot[sample(nrow(microbiome_one_hot), 
+                                              replace = TRUE), ]
+  age_range <- range(tmp_microbiome$age_years)
+  tmp_microbiome_site <- lapply(micro_dfs, function (site) {
+    tmp_microbiome %>% filter(Dataset == site)
+  })
+  names(tmp_microbiome_site) <- unique(micro_dfs)
+  
+  tmp_microbiome_site_bs <- lapply(tmp_microbiome_site, function(site) {
+    site %>%
+      cbind(dgamlss_bs(site$age_years,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_",
+                       n_knots = n_knots,
+                       orthogonalize = FALSE))
+  })
+  
+  site1_microbiome <- gamlss(formula(mu_formula),
+                             sigma.formula = formula(sigma_nu_formula),
+                             nu.formula = formula(sigma_nu_formula),
+                             data = tmp_microbiome_site_bs[[1]], family = BEZI())
+  site1_bs <- dgamlss_bs(tmp_microbiome_site[[1]]$age_years,
+                         age_range[1], age_range[2],
+                         spline_prefix = "age_",
+                         n_knots = n_knots,
+                         orthogonalize = FALSE)
+  
+  tmp_penalty_matrix_list <- generate_penalty_matrix(
+    site1_microbiome,
+    smooth_penalty_list = list(mu = attr(site1_bs, "P"),
+                               sigma = attr(site1_bs, "P"),
+                               nu = attr(site1_bs, "P")),
+    smooth_index_list = list(mu = c(rep(1, ncol(site1_bs)),
+                                    numeric(11)),
+                             sigma = c(rep(1, ncol(site1_bs))),
+                             nu = c(rep(1, ncol(site1_bs)))))
+  tmp_lambda_list <- list(mu = 18, 
+                          sigma = 18, 
+                          nu = 10000000)
+  
+  # Fit model
+  dgamlss_microbiome <- dgamlss_coordinating(
+    mu.formula = mu_formula,
+    sigma.formula = sigma_nu_formula,
+    nu.formula = sigma_nu_formula,
+    family = BEZI,
+    coef_crit = 0.05,
+    local_site_data = tmp_microbiome_site_bs[[1]],
+    site_data = tmp_microbiome_site_bs,
+    is_orthogonal = FALSE,
+    penalty_matrix_list = tmp_penalty_matrix_list,
+    lambda_list = tmp_lambda_list,
+    verbose = FALSE)
+  
+  # pooled_microbiome_gs <- gamlss(acti_prop ~ pb(age_years) + Dataset + GenderMale, 
+  #                                ~ pb(age_years),
+  #                                ~ pb(age_years),
+  #                                data = do.call(rbind, tmp_microbiome_site_bs), 
+  #                                family = BEZI())
+  # list(dgamlss_microbiome, pooled_microbiome_gs)
+  dgamlss_microbiome
+})
+
+hist(sapply(dgamlss_microbiome_boot, \(x) {
+  x$n_communications
+}))
+```
+
+# Communication and prediction plots
+```{r}
+# Communications plot
+microbiome_n_com <- sapply(dgamlss_microbiome_boot, \(x) {x$n_communications})
+com_plot <- ggplot(data.frame(com = microbiome_n_com)) +
+  geom_density(aes(com)) +
+  xlab("Number of Communication Rounds") +
+  ylab("Density") +
+  theme_bw(); com_plot
+
+# Predicted quantiles plot
+microbiome_pred_plot <- ggplot(microbiome_predictions, aes(pooled_gs_q, (dgamlss_q - pooled_gs_q))) +
+  geom_point(size = 0.1) +
+    geom_hline(yintercept = 0, color = "#A51122FF", size = 1) +
+  #geom_point(aes(color = as.factor(pooled_gs_q > 0)), size = 0.1) +
+  scale_y_continuous(breaks = c(-0.06, -0.04, -0.02, 0, 0.02, 0.04, 0.06), position = "right") +
+  xlab("Pooled GAMLSS Quantiles") +
+  ylab("Quantile Prediction Differences") +
+  ggtitle("Quantile Predictions") +
+  theme_bw() +
+  theme(plot.title = element_text(size = 13, hjust = 0.5, vjust = 0)); microbiome_pred_plot
+
+# pred_plot <- ggplot(all_predictions, aes(pooled_gs_q, (dgamlss_q))) +
+#   geom_point(size = 0.1) +
+#   xlab("Pooled GAMLSS quantiles") +
+#   ylab("dGAMLSS quantiles") +
+#   theme_bw(); pred_plot
+```
+
+# Centile plots
+```{r}
+# Centiles plot
+new_mu_list <- list(mu = pooled_microbiome$mu.x,
+                    sigma = pooled_microbiome$sigma.x,
+                    nu = pooled_microbiome$nu.x)
+
+new_mu_list$mu[, 23:32] <- 0
+new_mu_list$sigma[, 23] <- 0
+new_mu_list$nu[, 23] <- 0
+
+female_centile_plot <- dgamlss_centiles(dgamlss_microbiome_output,
+                                        continuous_var = do.call(rbind, microbiome_site_bs)$age_years,
+                                        new_mu.x = new_mu_list$mu,
+                                        new_sigma.x = new_mu_list$sigma,
+                                        new_nu.x = new_mu_list$nu,
+                                        new_tau.x = new_mu_list$tau,
+                                        centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+female_centile_plot$df <- female_centile_plot$df %>% mutate(Sex = "Female")
+
+new_mu_list$mu[, 32] <- 1
+new_mu_list$sigma[, 23] <- 1
+new_mu_list$nu[, 23] <- 1
+
+male_centile_plot <- dgamlss_centiles(dgamlss_microbiome_output,
+                                      continuous_var = do.call(rbind, microbiome_site_bs)$age_years,
+                                      new_mu.x = new_mu_list$mu,
+                                      new_sigma.x = new_mu_list$sigma,
+                                      new_nu.x = new_mu_list$nu,
+                                      new_tau.x = new_mu_list$tau,
+                                      centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+male_centile_plot$df <- male_centile_plot$df %>% mutate(Sex = "Male")
+
+joined_centile_df <- rbind(male_centile_plot$df, female_centile_plot$df)
+centile_plot <- ggplot() +
+  geom_line(data = joined_centile_df, aes(x, pred, color = fct_rev(centile), linetype = Sex)) +
+  labs(color = "Centile") +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 0.8, 0.2)) +
+  xlab("Age") + 
+  ylab("dGAMLSS Proteobacteria Proportion Centiles") +
+  theme_bw(); centile_plot
+```
+
+# Gold standard centiles plot
+```{r}
+newdata <- do.call(rbind, microbiome_site) %>% 
+  mutate(Dataset = "SINHA_CRC_2016",
+         GenderMale = 1)
+test <- predictAll(pooled_microbiome_gs, newdata = newdata)
+male_gs_centiles <- gamlss_centiles(test, continuous_var = newdata$age_years,
+                                    centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+
+newdata <- do.call(rbind, microbiome_site) %>% 
+  mutate(Dataset = "SINHA_CRC_2016",
+         GenderMale = 0)
+test <- predictAll(pooled_microbiome_gs, newdata = newdata)
+female_gs_centiles <- gamlss_centiles(test, continuous_var = newdata$age_years,
+                                      centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+
+male_gs_centiles$df <- male_gs_centiles$df %>% mutate(Sex = "Male")
+female_gs_centiles$df <- female_gs_centiles$df %>% mutate(Sex = "Female")
+
+joined_centile_df_gs <- rbind(male_gs_centiles$df, female_gs_centiles$df)
+centile_plot_gs <- ggplot(joined_centile_df_gs) +
+  geom_jitter(data = microbiome, aes(age_years, prot_prop), width = 0.5) +
+  geom_line(aes(x, pred, color = fct_rev(centile), linetype = Sex)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 0.8, 0.2)) +
+  labs(color = "Centile") +
+  xlab("Age") + 
+  ylab("Pooled GAMLSS Proteobacteria Relative Abundance Centiles") +
+  theme_bw(); centile_plot_gs
+
+joined_centiles <- ggarrange(centile_plot, centile_plot_gs, 
+                             common.legend = TRUE, legend = "right"); joined_centiles
+
+all_combined <- plot_grid(plot_grid(com_plot, pred_plot, nrow = 2), 
+                          joined_centiles,
+                          ncol = 2, 
+                          rel_widths = c(2, 4)); all_combined
+
+all_centile_df <- rbind(cbind(joined_centile_df, method = "dGAMLSS"),
+                        cbind(joined_centile_df_gs, method = "Pooled"))
+
+microbiome_centile_plot <- ggplot(all_centile_df) +
+  geom_line(aes(x, pred, color = centile, linetype = Sex)) +
+  scale_color_manual(values = c("#A51122FF", "#D53E00FF", "#E57800FF", "#EDA826FF", 
+                                "#F4D079FF", "#7DC2AEFF", 
+                                "#19A4A8FF", "#007FA7FF", "#324DA0FF")) +
+  facet_wrap(~ method) + 
+  labs(color = "Centile") +
+  xlab("Age") + 
+  ylab("Proteobacteria Relative Abundance") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.box.just = "left",
+        strip.text = element_text(size = 13),
+        strip.background = element_blank()); microbiome_centile_plot
+```
+
+# Save plots
+```{r}
+ggsave(here("figures/fixed_penalty_other.png"), 
+       all_combined,
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+ggsave(here("figures/fixed_penalty_centiles.png"),
+       joined_centiles,
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+ggsave(here("figures/for_paper/fixed_penalty_centiles.png"),
+       plot_grid(microbiome_centile_plot, microbiome_pred_plot,
+                 ncol = 2, rel_widths = c(2.5, 1), align = "h", axis = "tb"),
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+```
+
+

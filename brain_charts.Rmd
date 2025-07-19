@@ -1,0 +1,473 @@
+---
+title: "brain charts"
+author: "Fengling Hu"
+date: "2024-06-07"
+output: html_document
+---
+
+# Load functions
+```{r}
+library(tidyverse)
+library(here)
+library(Matrix)
+library(ggpubr)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+
+library(latex2exp)
+library(stringr)
+
+library(gamlss)
+library(gamlss.dist)
+library(mgcv)
+library(survival)
+library(caret)
+library(parallel)
+
+library(dgamlss)
+
+gamlss_centiles <- function(prediction,
+                            continuous_var,
+                            centiles = c(0.4, 2, 10, 25, 50, 75, 90, 98, 99.6)) {
+  parameters <- names(test)[names(test) %in% c("mu", "sigma", "nu", "tau")]
+  centile_order <- order(continuous_var)
+  dgamlss_prediction <- list(
+    mu.fv = if ("mu" %in% parameters) {
+      prediction$mu},
+    sigma.fv = if ("sigma" %in% parameters) {
+      prediction$sigma},
+    nu.fv = if ("nu" %in% parameters) {
+      prediction$nu},
+    tau.fv = if ("tau" %in% parameters) {
+      prediction$tau})
+  
+  qFamily <- match.fun(paste0("q", attr(prediction, "family")[1]))
+  
+  dgamlss_prediction$centiles <- vector("list", length(centiles))
+  for (i in 1:length(centiles)) {
+    if (length(parameters) == 1) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 2) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv,
+                       dgamlss_prediction$sigma.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 3) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv, dgamlss_prediction$sigma.fv,
+                       dgamlss_prediction$nu.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 4) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv, dgamlss_prediction$sigma.fv,
+                       dgamlss_prediction$nu.fv, dgamlss_prediction$tau.fv)[centile_order],
+        centile = centiles[i])
+    }
+  }
+  
+  centiles_df <- data.frame(do.call(rbind, dgamlss_prediction$centiles))
+  centiles_df$centile <- as.factor(centiles_df$centile)
+  
+  centile_plot <- ggplot(centiles_df, aes(x, pred, color = fct_rev(centile))) +
+    geom_line()
+  return(list(plot = centile_plot,
+              df = centiles_df))
+}
+```
+
+# Read data
+```{r}
+gmv <- read.csv(here("data/LBCC Data Share/lifespan_CN_imp-sites_euler_noukb.csv"))
+gmv <- gmv %>% 
+  mutate(study = str_replace_all(study, "-", "_")) %>% 
+  mutate(age_days = age_days) %>% 
+  filter(fs_version != "FSInfant")
+gmv_one_hot <- cbind(gmv[, 1:13],
+                     as.data.frame(predict(dummyVars(~ study + sex,
+                                                     data = gmv, 
+                                                     fullRank = FALSE), 
+                                           newdata = gmv)))
+gmv_site <- lapply(unique(gmv_one_hot$study), function(site_name) {
+  gmv_one_hot %>% dplyr::filter(study == site_name)
+})
+```
+
+# Gold Standard
+```{r}
+# Gold standard
+pooled_gmv_gs <- gamlss(GMV ~ pb(age_days, method = "GAIC", k = log(26480)) + study + sex,
+                        ~ pb(age_days, method = "GAIC", k = log(26480)) + study + sex,
+                        ~ pb(age_days, method = "GAIC", k = log(26480)) + sex,
+                        data = gmv, family = GG())
+summary(pooled_gmv_gs)
+edfAll(pooled_gmv_gs)
+
+pooled_gmv_gs <- gamlss(GMV ~ pb(age_days, method = "ML") + study + sex,
+                        ~ pb(age_days, method = "ML") + study + sex,
+                        ~ pb(age_days, method = "ML") + sex,
+                        data = gmv, family = GG())
+summary(pooled_gmv_gs)
+edfAll(pooled_gmv_gs)
+```
+
+# Automated penalty analysis
+```{r}
+# Make splines
+age_range <- range(gmv$age_days)
+n_knots <- 20
+
+# Fixed effect
+gmv_site_bs <- lapply(gmv_site, function(site) {
+  site %>%
+    cbind(dgamlss_bs(site$age_days,
+                     age_range[1], age_range[2],
+                     spline_prefix = "age_",
+                     n_knots = n_knots,
+                     orthogonalize = FALSE))
+})
+
+# Fit model
+mu_formula <- paste0("GMV ~ ", paste0("age_", 1:(n_knots + 3), collapse = " + "), " + ", 
+                     paste0(c("study3R_BRAIN", "studyabide1", "studyabide2", 
+                              "studyADHD200", "studyADNI", "studyAIBL", "studyAOBA", "studyAOMIC_ID1000", 
+                              "studyAOMIC_PIOP1", "studyAOMIC_PIOP2", "studyARWIBO", "studyBGSP", 
+                              "studyBHRCS", "studyBSNIP", "studyCALM", "studyCamCAN", "studyCAMFT", 
+                              "studyCornell_C1", "studyCornell_C2", "studycVEDA", "studydevCCNP", 
+                              "studyDLBS", "studyEDSD", "studyEMBARC", "studyFemaleASD", "studyGUSTO", 
+                              "studyHABS", "studyHBN", "studyHCP", "studyHCP_lifespanA", "studyHCP_lifespanD", 
+                              "studyICBM", "studyIMAGEN", "studyIMAP", "studyIXI", "studyLA5c", 
+                              "studyMCIC", "studyNarratives", "studyNHGRI", "studyNIHPD", "studyOASIS3", 
+                              "studyOulu", "studyPNC", "studyPOND", "studyPREVENTAD", "studySALD", 
+                              "studySLIM", "studyVETSA_run_1", "studyWAYNE"), collapse = " + "), " + sexFemale - 1")
+nu_formula <- paste0("GMV ~ ", paste0("age_", 1:(n_knots + 3), collapse = " + "), " + sexFemale - 1")
+
+site1_gmv <- gamlss_mock_fit(formula(mu_formula),
+                             sigma.formula = formula(mu_formula),
+                             nu.formula = formula(nu_formula),
+                             data = gmv_site_bs[[1]], family = BCPE())
+site1_bs <- dgamlss_bs(gmv_site[[1]]$age_days,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_",
+                       n_knots = n_knots,
+                       orthogonalize = FALSE)
+
+penalty_matrix_list <- generate_penalty_matrix(
+  site1_gmv,
+  smooth_penalty_list = list(mu = attr(site1_bs, "P"),
+                             sigma = attr(site1_bs, "P"),
+                             nu = attr(site1_bs, "P")),
+  smooth_index_list = list(mu = c(rep(1, ncol(site1_bs)), numeric(50)),
+                           sigma = c(rep(1, ncol(site1_bs)), numeric(50)),
+                           nu = c(rep(1, ncol(site1_bs)), 0)))
+
+dgamlss_gmv <- dgamlss_coordinating_penalized(
+  mu.formula = mu_formula,
+  sigma.formula = mu_formula,
+  nu.formula = nu_formula,
+  family = GG,
+  coef_crit = 0.05,
+  local_site_data = gmv_site_bs[[1]],
+  site_data = gmv_site_bs,
+  is_orthogonal = FALSE,
+  penalty_matrix_list = penalty_matrix_list,
+  lambda_list = list(mu = 10, sigma = 10, nu = 10),
+  method = "GAIC",
+  k = log(26480),
+  verbose = TRUE)
+dgamlss_gmv
+
+# Get inference
+inference_list <- lapply(1:length(gmv_site_bs), function(i) {
+  print(i)
+  site_gamlss <- gamlss_mock_fit(
+    formula = formula(mu_formula),
+    sigma.formula = formula(mu_formula),
+    nu.formula = formula(nu_formula),
+    family = GG(),
+    data = gmv_site_bs[[i]])
+  
+  dgamlss_get_inference(
+    site_gamlss,
+    c("mu", "sigma", "nu"),
+    dgamlss_gmv)
+})
+
+# Pool inference
+pooled_inference <- dgamlss_aggregate_inference(inference_list, dgamlss_gmv,
+                                                penalty_matrix_list = penalty_matrix_list,
+                                                lambda_list = list(mu = dgamlss_gmv$lambda_vec[1],
+                                                                   sigma = dgamlss_gmv$lambda_vec[2],
+                                                                   nu = dgamlss_gmv$lambda_vec[3]))
+pooled_inference
+site1_gmv <- gamlss_mock_fit(formula(mu_formula),
+                             sigma.formula = formula(mu_formula),
+                             nu.formula = formula(nu_formula),
+                             data = gmv_site_bs[[1]], family = GG())
+dgamlss_gmv_output <- dgamlss_create_summary(site1_gmv,
+                                             dgamlss_gmv,
+                                             dgamlss_gmv$global_deviance,
+                                             pooled_inference)
+dgamlss_summary(dgamlss_gmv_output)
+
+# Make quantile predictions
+dgamlss_predictions <- dgamlss_predict(dgamlss_gmv_output,
+                                       gamlss_mock_fit(formula = formula(mu_formula),
+                                                       sigma.formula = formula(mu_formula),
+                                                       nu.formula = formula(nu_formula),
+                                                       family = GG(),
+                                                       data = do.call(rbind, gmv_site_bs)))
+
+# Gold standard
+pooled_gmv <- gamlss_mock_fit(formula(mu_formula),
+                              sigma.formula = formula(mu_formula),
+                              nu.formula = formula(nu_formula),
+                              data = do.call(rbind, gmv_site_bs),
+                              family = GG())
+
+pooled_gmv_gs <- gamlss(GMV ~ pb(age_days) + study + sex,
+                        ~ pb(age_days) + study + sex,
+                        ~ pb(age_days) + sex,
+                        data = do.call(rbind, gmv_site_bs), family = GG())
+pooled_gmv_gs_predictions <- pGG(pooled_gmv_gs$y,
+                                 pooled_gmv_gs$mu.fv,
+                                 pooled_gmv_gs$sigma.fv,
+                                 pooled_gmv_gs$nu.fv)
+
+# Plotting fitted quantiles
+gmv_predictions <- data.frame(
+  pooled_gs_q = pooled_gmv_gs_predictions,
+  dgamlss_q = dgamlss_predictions$quantile,
+  pooled_gs_y = pooled_gmv_gs$mu.fv,
+  dgamlss_y = dgamlss_predictions$mu.fv)
+```
+
+# Bootstrapping number of iterations
+```{r}
+n_boot <- 100
+
+dgamlss_gmv_boot <- mclapply(1:n_boot, function(iter) {
+  print(iter)
+  tmp_gmv <- gmv_one_hot[sample(nrow(gmv), replace = TRUE), ]
+  age_range <- range(tmp_gmv$age_days)
+  tmp_gmv_site <- lapply(unique(gmv$study), function(study_name) {
+    tmp_gmv %>% filter(study == study_name)
+  })
+  names(tmp_gmv_site) <- unique(gmv$study)
+  
+  tmp_gmv_site_bs <- lapply(tmp_gmv_site, function(site) {
+    site %>%
+      cbind(dgamlss_bs(site$age_days,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_",
+                       n_knots = n_knots,
+                       orthogonalize = FALSE))
+  })
+  
+  penalty_matrix_list <- generate_penalty_matrix(
+    site1_gmv,
+    smooth_penalty_list = list(mu = attr(site1_bs, "P"),
+                               sigma = attr(site1_bs, "P"),
+                               nu = attr(site1_bs, "P")),
+    smooth_index_list = list(mu = c(rep(1, ncol(site1_bs)), numeric(50)),
+                             sigma = c(rep(1, ncol(site1_bs)), numeric(50)),
+                             nu = c(rep(1, ncol(site1_bs)), 0)))
+  
+  # Fit model
+  dgamlss_gmv <- dgamlss_coordinating_penalized(
+    mu.formula = mu_formula,
+    sigma.formula = mu_formula,
+    nu.formula = nu_formula,
+    family = GG,
+    coef_crit = 0.05,
+    local_site_data = tmp_gmv_site_bs[[1]],
+    site_data = tmp_gmv_site_bs,
+    is_orthogonal = FALSE,
+    penalty_matrix_list = penalty_matrix_list,
+    method = "GCV",
+    verbose = TRUE)
+  dgamlss_gmv
+}, mc.cores = 10)
+
+gmv_n_com <- lapply(dgamlss_gmv_boot, \(x) if (is.list(x)) x$n_communications else NULL) %>% unlist()
+```
+
+# Test distribution of EDF
+```{r}
+gamlss_bootstrap_BIC <- lapply(1:20, function(i) {
+  tmp_gmv <- gmv[sample(1:nrow(gmv), replace = T), ]
+  k_bic <- log(nrow(gmv))
+  tryCatch(
+    gamlss(gmv ~ pb(age_days, control = pb.control(method = "GAIC", k = k_bic)) + first_careunit + gender,
+           ~ pb(age_days, control = pb.control(method = "GAIC", k = k_bic)) + first_careunit + gender,
+           ~ pb(age_days, control = pb.control(method = "GAIC", k = k_bic)) + first_careunit + gender,
+           ~ pb(age_days, control = pb.control(method = "GAIC", k = k_bic)) + first_careunit + gender,
+           data = tmp_gmv, family = BCPE()
+    ),
+    error = function(e) NULL
+  )
+})
+
+new_gmv <- gmv %>% mutate(gender = "M", first_careunit = as.factor("Medical Intensive Care Unit (MICU)"))
+levels(new_gmv$gender) <- levels(gmv$gender)
+levels(new_gmv$first_careunit) <- levels(gmv$first_careunit)
+new_gmv_predict <- predictAll(gamlss_bootstrap_BIC[[8]], newdata = new_gmv)
+gamlss_to_plot <- gamlss_bootstrap_BIC[[8]]
+gamlss_to_plot$mu.fv <- new_gmv_predict$mu
+gamlss_to_plot$sigma.fv <- new_gmv_predict$sigma
+gamlss_to_plot$nu.fv <- new_gmv_predict$nu
+gamlss_to_plot$tau.fv <- new_gmv_predict$tau
+centiles(gamlss_to_plot, new_gmv$age_days)
+```
+
+# Communication and prediction plots
+```{r}
+# Communications plot
+com_plot <- ggplot(data.frame(com = gmv_n_com)) +
+  geom_density(aes(com)) +
+  xlab("Number of Communication Rounds") +
+  ylab("Density") +
+  theme_bw(); com_plot
+
+# Predicted quantiles plot
+gmv_pred_plot <- ggplot(gmv_predictions, aes(pooled_gs_q, (dgamlss_q - pooled_gs_q))) +
+  geom_point(size = 0.05) +
+  geom_hline(yintercept = 0, color = "#A51122FF", size = 1) +
+  #geom_point(aes(color = as.factor(pooled_gs_q > 0)), size = 0.1) +
+  scale_y_continuous(breaks = c(-0.06, -0.04, -0.02, 0, 0.02, 0.04, 0.06), position = "right") +
+  xlab("Pooled GAMLSS Quantiles") +
+  ylab("Quantile Prediction Differences") +
+  ggtitle("Quantile Predictions") +
+  theme_bw() +
+  theme(plot.title = element_text(size = 13, hjust = 0.5, vjust = 0)); gmv_pred_plot
+
+# pred_plot <- ggplot(gmv_predictions, aes(pooled_gs_q, (dgamlss_q))) +
+#   geom_point(size = 0.1) +
+#   xlab("Pooled GAMLSS quantiles") +
+#   ylab("dGAMLSS quantiles") +
+#   theme_bw(); pred_plot
+```
+
+# Centile plots
+```{r}
+# Centiles plot
+new_mu_list <- list(
+  mu = pooled_gmv$mu.x,
+  sigma = pooled_gmv$sigma.x,
+  nu = pooled_gmv$nu.x)
+
+new_mu_list$mu[, 24:73] <- 0
+new_mu_list$sigma[, 24:73] <- 0
+new_mu_list$nu[, 24] <- 0
+
+male_centile_plot <- dgamlss_centiles(dgamlss_gmv_output,
+                                      continuous_var = do.call(rbind, gmv_site_bs)$age_days,
+                                      new_mu.x = new_mu_list$mu,
+                                      new_sigma.x = new_mu_list$sigma,
+                                      new_nu.x = new_mu_list$nu,
+                                      centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+male_centile_plot$df <- male_centile_plot$df %>% mutate(Sex = "Male")
+
+new_mu_list$mu[, 73] <- 1
+new_mu_list$sigma[, 73] <- 1
+new_mu_list$nu[, 24] <- 1
+
+female_centile_plot <- dgamlss_centiles(dgamlss_gmv_output,
+                                        continuous_var = do.call(rbind, gmv_site_bs)$age_days,
+                                        new_mu.x = new_mu_list$mu,
+                                        new_sigma.x = new_mu_list$sigma,
+                                        new_nu.x = new_mu_list$nu,
+                                        new_tau.x = new_mu_list$tau,
+                                        centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+female_centile_plot$df <- female_centile_plot$df %>% mutate(Sex = "Female")
+
+joined_centile_df <- rbind(male_centile_plot$df, female_centile_plot$df)
+centile_plot <- ggplot() +
+  geom_line(data = joined_centile_df, aes(x, pred, color = fct_rev(centile), linetype = Sex)) +
+  labs(color = "Centile") +
+  #scale_y_continuous(limits = c(16, 59), breaks = seq(20, 60, 10)) +
+  xlab("Age at Admission") + 
+  ylab("dGAMLSS GMV Centiles") +
+  theme_bw(); centile_plot
+```
+
+# Gold standard centiles plot
+```{r}
+newdata <- do.call(rbind, gmv_site_bs) %>% 
+  mutate(sex = "Male",
+         study = "ABCD")
+test <- predictAll(pooled_gmv_gs, newdata = newdata)
+male_gs_centiles <- gamlss_centiles(test, continuous_var = newdata$age_days,
+                                    centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+
+newdata <- do.call(rbind, gmv_site_bs) %>% 
+  mutate(sex = "Female",
+         study = "ABCD")
+test <- predictAll(pooled_gmv_gs, newdata = newdata)
+female_gs_centiles <- gamlss_centiles(test, continuous_var = newdata$age_days,
+                                      centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+
+male_gs_centiles$df <- male_gs_centiles$df %>% mutate(Sex = "Male")
+female_gs_centiles$df <- female_gs_centiles$df %>% mutate(Sex = "Female")
+
+joined_centile_df_gs <- rbind(male_gs_centiles$df, female_gs_centiles$df)
+centile_plot_gs <- ggplot(joined_centile_df_gs) +
+  geom_line(aes(x, pred, color = fct_rev(centile), linetype = Sex)) +
+  #scale_y_continuous(limits = c(16, 59), breaks = seq(20, 60, 10)) +
+  labs(color = "Centile") +
+  xlab("Age at Admission") + 
+  ylab("Pooled GAMLSS gmv Centiles") +
+  theme_bw(); centile_plot_gs
+
+joined_centiles <- ggarrange(centile_plot, centile_plot_gs, 
+                             common.legend = TRUE, legend = "right"); joined_centiles
+
+all_combined <- plot_grid(plot_grid(com_plot, pred_plot, nrow = 2), 
+                          centile_plot,
+                          ncol = 2, 
+                          rel_widths = c(1, 2)); all_combined
+
+all_centile_df <- rbind(cbind(joined_centile_df, method = "dGAMLSS"),
+                        cbind(joined_centile_df_gs, method = "Pooled"))
+
+centile_plot_all <- ggplot(all_centile_df) +
+  geom_line(aes(x / 365, pred / 1000000, color = centile, linetype = Sex)) +
+  facet_wrap(~ method) + 
+  scale_color_manual(values = c("#A51122FF", "#D53E00FF", "#E57800FF", "#EDA826FF", 
+                                "#F4D079FF", "#7DC2AEFF", 
+                                "#19A4A8FF", "#007FA7FF", "#324DA0FF")) +
+  labs(color = "Centile") +
+  scale_x_log10(breaks = c(3, 5, 10, 20, 40, 70, 100)) +
+  xlab("Age") + 
+  ylab("Gray Matter Volume (L)") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.box.just = "left",
+        strip.text = element_text(size = 13),
+        strip.background = element_blank()); centile_plot_all
+```
+
+# Save plots
+```{r}
+ggsave(here("figures/automated_coef.png"), coef_plot,
+       width = 2000, height = 2000, units = "px", type = "cairo-png")
+ggsave(here("figures/automated_other.png"), 
+       all_combined,
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+ggsave(here("figures/automated_centiles.png"),
+       joined_centiles,
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+ggsave(here("figures/for_paper/automated_centiles.png"),
+       plot_grid(centile_plot_all, gmv_pred_plot,
+                 ncol = 2, rel_widths = c(2.5, 1), align = "h", axis = "tb"),
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+```

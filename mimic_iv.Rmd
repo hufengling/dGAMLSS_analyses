@@ -1,0 +1,818 @@
+---
+title: "mimic_iv"
+author: "Fengling Hu"
+date: "2024-06-07"
+output: html_document
+---
+
+# Load functions
+```{r}
+library(tidyverse)
+library(here)
+library(Matrix)
+library(ggpubr)
+library(cowplot)
+library(gridExtra)
+library(viridis)
+library(RColorBrewer)
+
+library(latex2exp)
+library(stringr)
+
+library(gamlss)
+library(gamlss.dist)
+library(mgcv)
+library(survival)
+
+library(parallel)
+library(dgamlss)
+
+gamlss_centiles <- function(prediction,
+                            continuous_var,
+                            centiles = c(0.4, 2, 10, 25, 50, 75, 90, 98, 99.6)) {
+  parameters <- names(test)[names(test) %in% c("mu", "sigma", "nu", "tau")]
+  centile_order <- order(continuous_var)
+  dgamlss_prediction <- list(
+    mu.fv = if ("mu" %in% parameters) {
+      prediction$mu},
+    sigma.fv = if ("sigma" %in% parameters) {
+      prediction$sigma},
+    nu.fv = if ("nu" %in% parameters) {
+      prediction$nu},
+    tau.fv = if ("tau" %in% parameters) {
+      prediction$tau})
+  
+  qFamily <- match.fun(paste0("q", attr(prediction, "family")[1]))
+  
+  dgamlss_prediction$centiles <- vector("list", length(centiles))
+  for (i in 1:length(centiles)) {
+    if (length(parameters) == 1) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 2) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv,
+                       dgamlss_prediction$sigma.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 3) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv, dgamlss_prediction$sigma.fv,
+                       dgamlss_prediction$nu.fv)[centile_order],
+        centile = centiles[i])
+    }
+    if (length(parameters) == 4) {
+      dgamlss_prediction$centiles[[i]] <- cbind(
+        x = continuous_var[centile_order],
+        pred = qFamily(centiles[i] / 100, dgamlss_prediction$mu.fv, dgamlss_prediction$sigma.fv,
+                       dgamlss_prediction$nu.fv, dgamlss_prediction$tau.fv)[centile_order],
+        centile = centiles[i])
+    }
+  }
+  
+  centiles_df <- data.frame(do.call(rbind, dgamlss_prediction$centiles))
+  centiles_df$centile <- as.factor(centiles_df$centile)
+  
+  centile_plot <- ggplot(centiles_df, aes(x, pred, color = fct_rev(centile))) +
+    geom_line()
+  return(list(plot = centile_plot,
+              df = centiles_df))
+}
+```
+
+# Read data
+```{r}
+# admissions <- read.csv("./data/mimic-iv-2.2/hosp/admissions.csv")
+# omr <- read.csv("./data/mimic-iv-2.2/hosp/omr.csv")
+
+
+# chartevents <- read.csv(here("data/mimic-iv-2.2/icu/chartevents.csv"), nrows = 1000000)
+# write.csv(chartevents, "test.csv", row.names = FALSE)
+
+demo <- read.csv(here("data/mimic-iv-2.2/hosp/patients.csv"))
+items <- read.csv(here("data/mimic-iv-2.2/icu/d_items.csv")) %>%
+  filter(abbreviation == "HR" |
+           abbreviation == "Admission Weight (Kg)" |
+           abbreviation == "Height (cm)" |
+           abbreviation == "NBPs" |
+           abbreviation == "NBPd" |
+           abbreviation == "NBPm")
+stay <- read.csv(here("data/mimic-iv-2.2/icu/icustays.csv")) %>%
+  filter(first_careunit == last_careunit) %>%
+  left_join(demo, by = "subject_id") %>%
+  mutate(admit_age = year(intime) - anchor_year + anchor_age) %>%
+  select(stay_id, first_careunit, gender, admit_age)
+
+
+# chart_filtered <- read_csv_chunked(
+#   "./data/mimic-iv-2.2/icu/chartevents.csv",
+#   callback = DataFrameCallback$new(
+#     function(x, pos) {
+#       subset(x, itemid %in% items$itemid)
+#     }),
+#   progress = F, chunk_size = 10000000)
+# write.csv(chart_filtered, here("data/chart_filtered.csv"),
+#           row.names = FALSE)
+# chart_filtered <- read.csv(here("data/chart_filtered.csv"))
+#
+# chart_filtered <- chart_filtered %>%
+#   left_join(stay, by = "stay_id")
+# chart_filtered <- chart_filtered[!is.na(chart_filtered$first_careunit), ]
+# chart_filtered <- chart_filtered %>% mutate(is_medical = ifelse(grepl("MICU", first_careunit), 1, 0),
+#                                             is_surgical = ifelse(grepl("SICU", first_careunit), 1, 0),
+#                                             is_cardiac = ifelse(grepl("CCU", first_careunit) | grepl("CVICU", first_careunit), 1, 0),
+#                                             is_neuro = ifelse(grepl("Neuro", first_careunit), 1, 0))
+
+# BMI
+# bmi <- chart_filtered[chart_filtered$itemid == 226512 |
+#                         chart_filtered$itemid == 226730, ] %>%
+#   pivot_wider(names_from = valueuom, values_from = valuenum) %>%
+#   group_by(stay_id) %>%
+#   summarise(subject_id = subject_id[1],
+#             first_careunit = as.factor(first_careunit[1]),
+#             charttime = charttime[1],
+#             admit_age = admit_age[1],
+#             gender = gender[1],
+#             is_medical = is_medical[1],
+#             is_surgical = is_surgical[1],
+#             is_cardiac = is_cardiac[1],
+#             is_neuro = is_neuro[1],
+#             kg = kg[!is.na(kg)][1],
+#             cm = cm[!is.na(cm)][1]) %>%
+#   filter(!is.na(kg) & !is.na(cm)) %>%
+#   mutate(bmi = kg / (cm / 100)^2) %>%
+#   filter(bmi > quantile(bmi, 0.01) & bmi < quantile(bmi, 0.99) &
+#          kg > quantile(kg, 0.01) & kg < quantile(kg, 0.99) &
+#          cm > quantile(cm, 0.01) & cm < quantile(cm, 0.99))
+# bmi <- bmi[!duplicated(bmi$subject_id), ]
+# write.csv(bmi, here("data/bmi.csv"), row.names = FALSE)
+
+bmi <- read.csv(here("data/bmi.csv")) %>%
+  mutate(genderF = ifelse(gender == "F", 1, 0))
+bmi$first_careunit <- as.factor(bmi$first_careunit)
+# bmi <- bmi %>% mutate(is_MICU = ifelse(grepl("MICU", first_careunit), 1, 0),
+#                       is_SICU = ifelse(grepl("SICU", first_careunit), 1, 0),
+#                       is_CCU = ifelse(grepl("CCU", first_careunit), 1, 0),
+#                       is_CVICU = ifelse(grepl("CVICU", first_careunit), 1, 0),
+#                       is_neuro = ifelse(grepl("Neuro", first_careunit), 1, 0))
+bmi_site <- lapply(unique(bmi$first_careunit), function(site) {
+  bmi %>% filter(first_careunit == site)
+})
+names(bmi_site) <- unique(bmi$first_careunit)
+
+
+# BP
+# bp <- chart_filtered[chart_filtered$itemid == 220179 |
+#                        chart_filtered$itemid == 220180 |
+#                        chart_filtered$itemid == 220181, ] %>%
+#   pivot_wider(names_from = itemid, values_from = valuenum) %>%
+#   rename(bps = "220179", bpd = "220180", bpm = "220181") %>%
+#   group_by(stay_id) %>%
+#   filter(charttime == min(charttime)) %>%
+#   reframe(subject_id = subject_id[1],
+#           first_careunit = as.factor(first_careunit[1]),
+#           charttime = charttime,
+#           firsttime = min(charttime),
+#           admit_age = admit_age[1],
+#           gender = gender[1],
+#           is_medical = is_medical[1],
+#           is_surgical = is_surgical[1],
+#           is_cardiac = is_cardiac[1],
+#           is_neuro = is_neuro[1],
+#           bps = bps[!is.na(bps)][1],
+#           bpd = bpd[!is.na(bpd)][1],
+#           bpm = bpm[!is.na(bpm)][1]) %>%
+#   filter(bps > bpd,
+#          bps > quantile(bps, 0.001, na.rm = T) & bps < quantile(bps, 0.999, na.rm = T) &
+#          bpd > quantile(bpd, 0.001, na.rm = T) & bpd < quantile(bpd, 0.999, na.rm = T) &
+#          bpm > quantile(bpm, 0.001, na.rm = T) & bpd < quantile(bpm, 0.999, na.rm = T)) %>%
+#   mutate(bpm = ifelse(bpm > bps | bpm < bpd, NA, bpm))
+# bp <- bp[!duplicated(bp$subject_id), ]
+# write.csv(bp, here("data/bp.csv"), row.names = FALSE)
+
+bp <- read.csv(here("data/bp.csv"))
+bp$first_careunit <- as.factor(bp$first_careunit)
+bp_site <- lapply(unique(bp$first_careunit), function(site) {
+  bp %>% filter(first_careunit == site)
+})
+names(bp_site) <- unique(bp$first_careunit)
+
+# HR
+# hr <- chart_filtered[chart_filtered$itemid == 220045, ] %>%
+#   group_by(stay_id) %>%
+#   filter(charttime == min(charttime)) %>%
+#   reframe(subject_id = subject_id[1],
+#           first_careunit = as.factor(first_careunit[1]),
+#           charttime = charttime[1],
+#           admit_age = admit_age[1],
+#           gender = gender[1],
+#           is_medical = is_medical[1],
+#           is_surgical = is_surgical[1],
+#           is_cardiac = is_cardiac[1],
+#           is_neuro = is_neuro[1],
+#           hr = as.numeric(value)) %>%
+#   filter(hr > quantile(hr, 0.001, na.rm = T) & hr < quantile(hr, 0.999, na.rm = T))
+# hr <- hr[!duplicated(hr$subject_id), ]
+# write.csv(hr, here("data/hr.csv"), row.names = FALSE)
+
+hr <- read.csv(here("data/hr.csv"))
+hr$first_careunit <- as.factor(hr$first_careunit)
+hr_site <- lapply(unique(hr$first_careunit), function(site) {
+  hr %>% filter(first_careunit == site)
+})
+names(hr_site) <- unique(hr$first_careunit)
+```
+
+# Gold Standard
+```{r}
+# Gold standard
+gs_bmi <- gamlss(bmi ~ pb(admit_age) + first_careunit + gender,
+                 ~ pb(admit_age) + first_careunit + gender,
+                 ~ pb(admit_age) + first_careunit + gender,
+                 ~ pb(admit_age) + first_careunit + gender,
+                 data = bmi, family = BCPE())
+summary(gs_bmi)
+edfAll(gs_bmi)
+
+chooseDist(gs_bmi, k = c(2, 10.1311), type = "realplus", parallel = "multicore", ncpus = 10)
+```
+
+# Fixed effect spline dGAMLSS Analysis
+```{r}
+# Make splines
+age_range <- range(bmi$admit_age)
+n_knots <- c(6, 5, 2, 2)
+
+# Fixed effect
+bmi_site_bs <- lapply(bmi_site, function(site) {
+  site %>%
+    cbind(dgamlss_bs(site$admit_age,
+                     age_range[1], age_range[2],
+                     spline_prefix = "age_mu_",
+                     n_knots = n_knots[1],
+                     orthogonalize = FALSE
+    )) %>%
+    cbind(dgamlss_bs(site$admit_age,
+                     age_range[1], age_range[2],
+                     spline_prefix = "age_sigma_",
+                     n_knots = n_knots[2],
+                     orthogonalize = FALSE
+    )) %>%
+    cbind(dgamlss_bs(site$admit_age,
+                     age_range[1], age_range[2],
+                     spline_prefix = "age_nu_",
+                     n_knots = n_knots[3],
+                     orthogonalize = FALSE
+    )) %>%
+    cbind(dgamlss_bs(site$admit_age,
+                     age_range[1], age_range[2],
+                     spline_prefix = "age_tau_",
+                     n_knots = n_knots[4],
+                     orthogonalize = FALSE
+    ))
+})
+
+# Fit model
+mu_formula <- paste0("bmi ~ ", paste0("age_mu_", 1:(n_knots[1] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+sigma_formula <- paste0("bmi ~ ", paste0("age_sigma_", 1:(n_knots[2] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+nu_formula <- paste0("bmi ~ ", paste0("age_nu_", 1:(n_knots[3] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+tau_formula <- paste0("bmi ~ ", paste0("age_tau_", 1:(n_knots[4] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+
+dgamlss_bmi <- dgamlss_coordinating(
+  mu.formula = mu_formula,
+  sigma.formula = sigma_formula,
+  nu.formula = nu_formula,
+  tau.formula = tau_formula,
+  family = BCPE,
+  coef_crit = 0.05,
+  local_site_data = bmi_site_bs[[1]],
+  site_data = bmi_site_bs,
+  is_orthogonal = FALSE,
+  basis_sizes = n_knots + 1,
+  verbose = TRUE)
+dgamlss_bmi
+
+# Get inference
+inference_list <- vector("list", length(bmi_site_bs))
+for (i in 1:length(bmi_site_bs)) {
+  print(i)
+  site_gamlss <- gamlss_mock_fit(
+    formula = formula(mu_formula),
+    sigma.formula = formula(sigma_formula),
+    nu.formula = formula(nu_formula),
+    tau.formula = formula(tau_formula),
+    family = BCPE(),
+    data = bmi_site_bs[[i]]
+  )
+  inference_list[[i]] <- dgamlss_get_inference(
+    site_gamlss,
+    c("mu", "sigma", "nu", "tau"),
+    dgamlss_bmi
+  )
+}
+
+# Pool inference
+pooled_inference <- dgamlss_aggregate_inference(inference_list, dgamlss_bmi)
+pooled_inference
+site1_bmi <- gamlss(formula(mu_formula),
+                    sigma.formula = formula(sigma_formula),
+                    nu.formula = formula(nu_formula),
+                    tau.formula = formula(tau_formula),
+                    data = bmi_site_bs[[1]], family = BCPE()
+)
+dgamlss_bmi_output <- dgamlss_create_summary(site1_bmi,
+                                             dgamlss_bmi,
+                                             dgamlss_bmi$global_deviance,
+                                             pooled_inference,
+                                             spline_prefix = list(
+                                               mu = "age_mu_",
+                                               sigma = "age_sigma_",
+                                               nu = "age_nu_",
+                                               tau = "age_tau_"
+                                             )
+)
+dgamlss_summary(dgamlss_bmi_output)
+
+# Make quantile predictions
+dgamlss_predictions <- dgamlss_predict(
+  dgamlss_bmi_output,
+  gamlss_mock_fit(
+    formula = formula(mu_formula),
+    sigma.formula = formula(sigma_formula),
+    nu.formula = formula(nu_formula),
+    tau.formula = formula(tau_formula),
+    family = BCPE(),
+    data = do.call(rbind, bmi_site_bs)
+  )
+)
+
+# Gold standard
+pooled_bmi <- gamlss(formula(mu_formula),
+                     sigma.formula = formula(sigma_formula),
+                     nu.formula = formula(nu_formula),
+                     tau.formula = formula(tau_formula),
+                     data = do.call(rbind, bmi_site_bs),
+                     family = BCPE()
+)
+summary(pooled_bmi)
+pooled_bmi_predictions <- pBCPE(
+  pooled_bmi$y,
+  pooled_bmi$mu.fv,
+  pooled_bmi$sigma.fv,
+  pooled_bmi$nu.fv,
+  pooled_bmi$tau.fv
+)
+pooled_bmi_gs <- gamlss(bmi ~ pb(admit_age) + is_medical + is_surgical + is_cardiac + is_neuro + gender,
+                        ~ pb(admit_age) + is_medical + is_surgical + is_cardiac + is_neuro + gender,
+                        ~ pb(admit_age) + is_medical + is_surgical + is_cardiac + is_neuro + gender,
+                        ~ pb(admit_age) + is_medical + is_surgical + is_cardiac + is_neuro + gender,
+                        data = do.call(rbind, bmi_site_bs),
+                        family = BCPE()
+)
+summary(pooled_bmi_gs)
+pooled_bmi_gs_predictions <- pBCPE(
+  pooled_bmi_gs$y,
+  pooled_bmi_gs$mu.fv,
+  pooled_bmi_gs$sigma.fv,
+  pooled_bmi_gs$nu.fv,
+  pooled_bmi_gs$tau.fv
+)
+
+# Plotting fitted quantiles
+bmi_predictions <- data.frame(
+  pooled_gs_q = pooled_bmi_gs_predictions,
+  pooled_bs_q = pooled_bmi_predictions,
+  dgamlss_q = dgamlss_predictions$quantile,
+  pooled_gs_y = pooled_bmi_gs$mu.fv,
+  pooled_bs_y = pooled_bmi$mu.fv,
+  dgamlss_y = dgamlss_predictions$mu.fv
+)
+```
+
+# Bootstrapping number of iterations
+```{r}
+n_boot <- 100
+# Fit model
+mu_formula <- paste0("bmi ~ ", paste0("age_mu_", 1:(n_knots[1] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+sigma_formula <- paste0("bmi ~ ", paste0("age_sigma_", 1:(n_knots[2] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+nu_formula <- paste0("bmi ~ ", paste0("age_nu_", 1:(n_knots[3] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+tau_formula <- paste0("bmi ~ ", paste0("age_tau_", 1:(n_knots[4] + 2), collapse = " + "), " + is_medical + is_surgical + is_cardiac + is_neuro + genderF - 1")
+care_units <- unique(bmi$first_careunit)
+
+dgamlss_bmi_boot <- mclapply(1:n_boot, function(iter) {
+  print(iter)
+  tmp_bmi <- bmi[sample(nrow(bmi), replace = TRUE), ]
+  age_range <- range(tmp_bmi$admit_age)
+  tmp_bmi_site <- lapply(care_units, function(site) {
+    tmp_bmi %>% filter(first_careunit == site)
+  })
+  names(tmp_bmi_site) <- unique(care_units)
+  
+  tmp_bmi_site_bs <- lapply(tmp_bmi_site, function(site) {
+    site %>%
+      cbind(dgamlss_bs(site$admit_age,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_mu_",
+                       n_knots = n_knots[1],
+                       orthogonalize = FALSE
+      )) %>%
+      cbind(dgamlss_bs(site$admit_age,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_sigma_",
+                       n_knots = n_knots[2],
+                       orthogonalize = FALSE
+      )) %>%
+      cbind(dgamlss_bs(site$admit_age,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_nu_",
+                       n_knots = n_knots[3],
+                       orthogonalize = FALSE
+      )) %>%
+      cbind(dgamlss_bs(site$admit_age,
+                       age_range[1], age_range[2],
+                       spline_prefix = "age_tau_",
+                       n_knots = n_knots[4],
+                       orthogonalize = FALSE
+      ))
+  })
+  
+  # Fit model
+  dgamlss_bmi <- dgamlss_coordinating(
+    mu.formula = mu_formula,
+    sigma.formula = sigma_formula,
+    nu.formula = nu_formula,
+    tau.formula = tau_formula,
+    family = BCPE,
+    coef_crit = 0.05,
+    local_site_data = tmp_bmi_site_bs[[1]],
+    site_data = tmp_bmi_site_bs,
+    is_orthogonal = FALSE,
+    basis_sizes = n_knots + 1,
+    verbose = TRUE
+  )
+  dgamlss_bmi
+}, mc.cores = 10)
+
+bmi_n_com <- lapply(dgamlss_bmi_boot, \(x) x$n_communications) %>% unlist()
+```
+
+# Plots
+```{r}
+# Communications plot
+bmi_com_plot <- ggplot(data.frame(com = bmi_n_com)) +
+  geom_density(aes(com)) +
+  xlab("Number of Communication Rounds") +
+  ylab("Density") +
+  theme_bw(); bmi_com_plot
+
+# Predicted quantiles plot
+bmi_pred_plot <- ggplot(bmi_predictions, aes(pooled_bs_q, (dgamlss_q - pooled_bs_q))) +
+  geom_point(size = 0.1) +
+  geom_hline(yintercept = 0, color = "#A51122FF", size = 1) +
+  #geom_point(aes(color = as.factor(pooled_gs_q > 0)), size = 0.1) +
+  xlab("Pooled GAMLSS Quantiles") +
+  ylab("Quantile Prediction Differences") +
+  scale_y_continuous(limits = c(-0.005, 0.005), position = "right") +
+  ggtitle("Quantile Predictions") +
+  theme_bw() +
+  theme(plot.title = element_text(size = 13, hjust = 0.5, vjust = 0)); bmi_pred_plot
+# theme(legend.position = "bottom", 
+#       legend.title = element_blank(),
+#       legend.text = element_blank(),
+#       legend.key = element_blank()) + 
+# guides(color = guide_legend(override.aes = list(color = NA))); bmi_pred_plot
+
+bmi_plot_data <- ggplot(bmi, aes(admit_age, bmi)) +
+  geom_jitter(size = 0.1, width = 1); bmi_plot_data
+
+# bmi_pred_plot <- ggplot(bmi_predictions, aes(pooled_gs_q, (dgamlss_q))) +
+#   geom_point(size = 0.1) +
+#   xlab("Pooled GAMLSS quantiles") +
+#   ylab("dGAMLSS quantiles") +
+#   theme_bw(); bmi_pred_plot
+```
+
+# Forest plot
+```{r}
+# Forest plot
+forest_df <- data.frame(
+  label = c(names(dgamlss_bmi_output$mu.coefficients),
+            names(dgamlss_bmi_output$sigma.coefficients),
+            names(dgamlss_bmi_output$nu.coefficients),
+            names(dgamlss_bmi_output$tau.coefficients),
+            names(pooled_bmi$mu.coefficients),
+            names(pooled_bmi$sigma.coefficients),
+            names(pooled_bmi$nu.coefficients),
+            names(pooled_bmi$tau.coefficients)),
+  mean = c(dgamlss_bmi_output$mu.coefficients,
+           dgamlss_bmi_output$sigma.coefficients,
+           dgamlss_bmi_output$nu.coefficients,
+           dgamlss_bmi_output$tau.coefficients,
+           pooled_bmi$mu.coefficients,
+           pooled_bmi$sigma.coefficients,
+           pooled_bmi$nu.coefficients,
+           pooled_bmi$tau.coefficients),
+  se = c(dgamlss_bmi_output$vcov$se,
+         summary(pooled_bmi)[, 2]),
+  method = c(rep("dGAMLSS", 43), rep("Pooled", 43)),
+  parameter = rep(c(rep("mu", 13),
+                    rep("sigma", 12),
+                    rep("nu", 9),
+                    rep("tau", 9)), 2)) %>%
+  mutate(lower = mean - 1.96 * se, upper = mean + 1.96 * se,
+         is_age = ifelse(str_detect(label, "age"), TRUE, FALSE),
+         label = ifelse(str_detect(label, "is") | str_detect(label, "gender"),
+                        paste0(label, "_", parameter), label),
+         label_no_param = str_replace_all(label, c(
+           `_mu` = "", `_sigma` = "",
+           `_nu` = "", `_tau` = "")),
+         nice_labels = str_replace_all(label_no_param, "is_", ""),
+         nice_labels = ifelse(nice_labels == "genderF", "Female", nice_labels),
+         nice_labels = ifelse(nice_labels == "neuro", "Neurologic", nice_labels),
+         nice_labels = str_to_title(nice_labels),
+         nice_labels = str_replace_all(nice_labels, "Age_", "Age ")) %>% 
+  rename(Method = method)
+
+# forest_df$nice_labels <- factor(forest_df$nice_labels, 
+#                                 levels = c("Age_8", "Age_7", "Age_6", "Age_5",
+#                                            "Age_4", "Age_3", "Age_2", "Age_1", 
+#                                            "Medical", "Surgical", "Neurologic", "Cardiac",
+#                                            "Female"))
+forest_df$parameter <- factor(forest_df$parameter,
+                              levels = c(TeX("$\\mu$"), TeX("$\\sigma$"),
+                                         TeX("$\\nu$"), TeX("$\\tau$")))
+
+
+coef_plot <- ggarrange(forestplot(forest_df %>% filter(parameter == "mu", is_age == TRUE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         theme(axis.title.x = element_blank()),
+                       forestplot(forest_df %>% filter(parameter == "mu", is_age == FALSE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         scale_y_discrete(position = "right") +
+                         ylab(TeX("$\\mu$")) +
+                         theme(axis.title.x = element_blank(),
+                               axis.text.y.right = element_text(hjust = 0),
+                               axis.title.y.right = element_text(angle = 0, vjust = 0.5)),
+                       forestplot(forest_df %>% filter(parameter == "sigma", is_age == TRUE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         theme(axis.title.x = element_blank()),
+                       forestplot(forest_df %>% filter(parameter == "sigma", is_age == FALSE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         scale_y_discrete(position = "right") +
+                         ylab(TeX("$\\sigma$")) +
+                         theme(axis.title.x = element_blank(),
+                               axis.text.y.right = element_text(hjust = 0),
+                               axis.title.y.right = element_text(angle = 0, vjust = 0.5)),
+                       forestplot(forest_df %>% filter(parameter == "nu", is_age == TRUE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         theme(axis.title.x = element_blank()),
+                       forestplot(forest_df %>% filter(parameter == "nu", is_age == FALSE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         ylab(TeX("$\\nu$")) +
+                         scale_y_discrete(position = "right") +
+                         theme(axis.title.x = element_blank(),
+                               axis.text.y.right = element_text(hjust = 0),
+                               axis.title.y.right = element_text(angle = 0, vjust = 0.5)),
+                       forestplot(forest_df %>% filter(parameter == "tau", is_age == TRUE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         theme(axis.title.x = element_blank()),
+                       forestplot(forest_df %>% filter(parameter == "tau", is_age == FALSE), 
+                                  name = nice_labels, estimate = mean, se = se, colour = Method) +
+                         scale_color_manual(values = c("#A51122FF", "#007FA7FF")) +
+                         scale_y_discrete(position = "right") +
+                         ylab(TeX("$\\tau$")) +
+                         theme(axis.title.x = element_blank(),
+                               axis.text.y.right = element_text(hjust = 0),
+                               axis.title.y.right = element_text(angle = 0, vjust = 0.5)),
+                       nrow = 4, ncol = 2, common.legend = TRUE, legend = "bottom",
+                       heights = c(1.6, 1.4, 1, 1)); coef_plot
+
+coef_plot <- plot_grid(
+  ggplot(data = forest_df %>% filter(parameter == "mu", is_age == TRUE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    facet_grid(~ method) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(), 
+          strip.background = element_blank()),
+  ggplot(data = forest_df %>% filter(parameter == "mu", is_age == FALSE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    facet_grid(parameter ~ method, labeller = label_parsed) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          strip.background = element_blank()),
+  ggplot(data = forest_df %>% filter(parameter == "sigma", is_age == TRUE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    facet_grid(~ method) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          strip.background = element_blank(),
+          strip.text.x = element_blank()),
+  ggplot(data = forest_df %>% filter(parameter == "sigma", is_age == FALSE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    facet_grid(parameter ~ method, labeller = label_parsed) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          strip.background = element_blank(),
+          strip.text.x = element_blank()),
+  ggplot(data = forest_df %>% filter(parameter == "nu", is_age == TRUE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    facet_grid(~ method) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          strip.background = element_blank(),
+          strip.text.x = element_blank()),
+  ggplot(data = forest_df %>% filter(parameter == "nu", is_age == FALSE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    scale_y_continuous(breaks = c(-0.6, -0.4, -0.2, 0, 0.2, 0.4)) + 
+    facet_grid(parameter ~ method, labeller = label_parsed) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          strip.background = element_blank(),
+          strip.text.x = element_blank()),
+  ggplot(data = forest_df %>% filter(parameter == "tau", is_age == TRUE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    facet_grid(~ method) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          strip.background = element_blank(),
+          strip.text.x = element_blank()),
+  ggplot(data = forest_df %>% filter(parameter == "tau", is_age == FALSE),
+         aes(x = nice_labels, y = mean, ymin = lower, ymax = upper)) +
+    geom_pointrange() +
+    geom_hline(yintercept = 0, lty = 2) + # add a dotted line at x=1 after flip
+    facet_grid(parameter ~ method, labeller = label_parsed) +
+    coord_flip() + # flip coordinates (puts labels on y axis)
+    xlab("Label") +
+    theme_bw() +
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          strip.background = element_blank(),
+          strip.text.x = element_blank()),
+  ncol = 2, nrow = 4, rel_heights = c(1.3, 1.2, 1, 1)); coef_plot
+```
+
+# Centile plots
+```{r}
+# Centiles plot
+new_mu_list <- list(
+  mu = pooled_bmi$mu.x,
+  sigma = pooled_bmi$sigma.x,
+  nu = pooled_bmi$nu.x,
+  tau = pooled_bmi$tau.x)
+
+new_mu_list$mu[, 9:13] <- 0
+new_mu_list$sigma[, 8:12] <- 0
+new_mu_list$nu[, 5:9] <- 0
+new_mu_list$tau[, 5:9] <- 0
+
+male_centile_plot <- dgamlss_centiles(dgamlss_bmi_output,
+                                      continuous_var = do.call(rbind, bmi_site_bs)$admit_age,
+                                      new_mu.x = new_mu_list$mu,
+                                      new_sigma.x = new_mu_list$sigma,
+                                      new_nu.x = new_mu_list$nu,
+                                      new_tau.x = new_mu_list$tau,
+                                      centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+male_centile_plot$df <- male_centile_plot$df %>% mutate(Sex = "Male")
+
+new_mu_list$mu[, 13] <- 1
+new_mu_list$sigma[, 12] <- 1
+new_mu_list$nu[, 9] <- 1
+new_mu_list$tau[, 9] <- 1
+
+female_centile_plot <- dgamlss_centiles(dgamlss_bmi_output,
+                                        continuous_var = do.call(rbind, bmi_site_bs)$admit_age,
+                                        new_mu.x = new_mu_list$mu,
+                                        new_sigma.x = new_mu_list$sigma,
+                                        new_nu.x = new_mu_list$nu,
+                                        new_tau.x = new_mu_list$tau,
+                                        centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+female_centile_plot$df <- female_centile_plot$df %>% mutate(Sex = "Female")
+
+joined_centile_df <- rbind(male_centile_plot$df, female_centile_plot$df)
+centile_plot <- ggplot() +
+  geom_line(data = joined_centile_df, aes(x, pred, color = fct_rev(centile), linetype = Sex)) +
+  labs(color = "Centile") +
+  scale_y_continuous(limits = c(16, 59), breaks = seq(20, 60, 10)) +
+  xlab("Age at Admission") + 
+  ylab("dGAMLSS BMI Centiles") +
+  theme_bw(); centile_plot
+```
+
+# Gold standard centiles plot
+```{r}
+newdata <- do.call(rbind, bmi_site_bs) %>% 
+  mutate(across(starts_with("is_"), function(x) {0}),
+         genderF = 0)
+test <- predictAll(pooled_bmi, newdata = newdata)
+male_gs_centiles <- gamlss_centiles(test, continuous_var = newdata$admit_age,
+                                    centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+
+newdata <- do.call(rbind, bmi_site_bs) %>% 
+  mutate(across(starts_with("is_"), function(x) {0}),
+         genderF = 1)
+test <- predictAll(pooled_bmi, newdata = newdata)
+female_gs_centiles <- gamlss_centiles(test, continuous_var = newdata$admit_age,
+                                      centiles = c(0.5, 2.5, 10, 25, 50, 75, 90, 97.5, 99.5))
+
+male_gs_centiles$df <- male_gs_centiles$df %>% mutate(Sex = "Male")
+female_gs_centiles$df <- female_gs_centiles$df %>% mutate(Sex = "Female")
+
+joined_centile_df_gs <- rbind(male_gs_centiles$df, female_gs_centiles$df)
+# centile_plot_gs <- ggplot(joined_centile_df_gs) +
+#   geom_line(aes(x, pred, color = fct_rev(centile), linetype = Sex)) +
+#   scale_y_continuous(limits = c(16, 59), breaks = seq(20, 60, 10)) +
+#   labs(color = "Centile") +
+#   xlab("Age at Admission") + 
+#   ylab("Pooled GAMLSS BMI Centiles") +
+#   theme_bw(); centile_plot_gs
+
+all_centile_df <- rbind(cbind(joined_centile_df, method = "dGAMLSS"),
+                        cbind(joined_centile_df_gs, method = "Pooled"))
+
+centile_plot_all <- ggplot(all_centile_df) +
+ # geom_point(data = bmi, aes(admit_age, bmi)) +
+  geom_line(aes(x, pred, color = centile, linetype = Sex)) +
+  scale_color_manual(values = c("#A51122FF", "#D53E00FF", "#E57800FF", "#EDA826FF", 
+                                "#F4D079FF", "#7DC2AEFF", 
+                                "#19A4A8FF", "#007FA7FF", "#324DA0FF")) +
+  facet_wrap(~ method) + 
+  labs(color = "Centile") +
+  xlab("Age at Admission") + 
+  ylab("BMI") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.box.just = "left",
+        strip.text = element_text(size = 13),
+        strip.background = element_blank()); centile_plot_all
+
+# joined_centiles <- ggarrange(centile_plot, centile_plot_gs, 
+#                              common.legend = TRUE, legend = "right"); joined_centiles
+# 
+# all_combined <- plot_grid(plot_grid(bmi_com_plot, bmi_pred_plot, nrow = 2), 
+#                           centile_plot,
+#                           ncol = 2, 
+#                           rel_widths = c(1, 2)); all_combined
+```
+
+# Save plots
+```{r}
+ggsave(here("figures/for_paper/fixed_effect_coef.png"), coef_plot,
+       width = 2000, height = 3100, units = "px", type = "cairo-png")
+ggsave(here("figures/fixed_effect_other.png"), 
+       all_combined,
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+ggsave(here("figures/fixed_effect_centiles.png"),
+       joined_centiles,
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+ggsave(here("figures/for_paper/fixed_effect_centiles.png"),
+       plot_grid(centile_plot_all, bmi_pred_plot,
+                 ncol = 2, rel_widths = c(2.5, 1), align = "h", axis = "tb"),
+       width = 3000, height = 2000, units = "px", type = "cairo-png")
+```
